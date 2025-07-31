@@ -123,7 +123,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Start keyboard switching functionality after window is created
         initializeKeyboardSwitching()
         
-        let contentView = NSHostingView(rootView: ContentView())
+        // Create WindowManager for the content view
+        let windowManager = WindowManager()
+        let contentView = NSHostingView(rootView: ContentView().environmentObject(windowManager))
         
         // Get screen width to make taskbar full width
         let screenWidth = NSScreen.main?.visibleFrame.width ?? 1200
@@ -154,6 +156,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         
         window.makeKeyAndOrderFront(nil)
+        
+        // Connect WindowManager to KeyboardSwitcher for real window data
+        keyboardSwitcher.connectWindowManager(windowManager)
     }
     
     private func initializeKeyboardSwitching() {
@@ -166,6 +171,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if keyboardPermissionManager.hasAllRequiredPermissions {
             logger.info("All permissions available - starting keyboard switcher", category: .keyboardSwitching)
             keyboardSwitcher.start()
+            
+            // Phase 2 complete - key assignment algorithm ready
         } else {
             logger.warning("Missing keyboard permissions - will monitor until available", category: .keyboardSwitching)
             
@@ -179,6 +186,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 if self.keyboardPermissionManager.hasAllRequiredPermissions && !self.keyboardSwitcher.isActive {
                     self.logger.info("Permissions now available - starting keyboard switcher", category: .keyboardSwitching)
                     self.keyboardSwitcher.start()
+                    
+                    // Phase 2 complete - key assignment algorithm ready
+                    
                     timer.invalidate()
                 }
             }

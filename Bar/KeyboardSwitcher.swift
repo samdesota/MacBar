@@ -14,15 +14,27 @@ class KeyboardSwitcher: ObservableObject {
     
     @Published var isActive: Bool = false
     @Published var isSwitchingMode: Bool = false
+    @Published var availableWindows: [WindowInfo] = []
+    @Published var lastError: String?
     
     private let logger = Logger.shared
     private let permissionManager = KeyboardPermissionManager.shared
+    private let keyAssignmentManager = KeyAssignmentManager.shared
+    
+    // Window management integration
+    private weak var windowManager: WindowManager?
     
     // Event monitoring
     private var globalKeyDownMonitor: Any?
     private var globalKeyUpMonitor: Any?
     private var localKeyDownMonitor: Any?
     private var localKeyUpMonitor: Any?
+    
+    // Switching mode keystroke monitoring
+    private var switchingModeKeyMonitor: Any?
+    
+    // Event tap for capturing keystrokes during switching mode
+    private var eventTap: CFMachPort?
     
     // Command key tracking
     private var commandKeyDownTime: Date?
@@ -41,6 +53,12 @@ class KeyboardSwitcher: ObservableObject {
         
         // Enable keyboard switching logging for testing
         logger.enableCategory(.keyboardSwitching)
+    }
+    
+    /// Connect to WindowManager for real window data and activation
+    func connectWindowManager(_ windowManager: WindowManager) {
+        self.windowManager = windowManager
+        logger.info("WindowManager connected to KeyboardSwitcher", category: .keyboardSwitching)
     }
     
     deinit {
@@ -79,6 +97,8 @@ class KeyboardSwitcher: ObservableObject {
         
         stopGlobalKeyMonitoring()
         stopLocalKeyMonitoring()
+        stopSwitchingModeKeyMonitoring()
+        destroyEventTap()
         deactivateSwitchingMode()
         
         isActive = false
@@ -255,8 +275,16 @@ class KeyboardSwitcher: ObservableObject {
         
         logger.info("🎯 ACTIVATING SWITCHING MODE", category: .keyboardSwitching)
         
+        // Update window list and assign keys
+        updateWindowListAndAssignKeys()
+        
+        // Start monitoring keystrokes during switching mode
+        createEventTap()
+        startSwitchingModeKeyMonitoring()
+        
         DispatchQueue.main.async {
             self.isSwitchingMode = true
+            self.lastError = nil
         }
         
         resetSwitchingModeTimer()
@@ -266,6 +294,10 @@ class KeyboardSwitcher: ObservableObject {
         guard isSwitchingMode else { return }
         
         logger.info("⏹️ DEACTIVATING SWITCHING MODE", category: .keyboardSwitching)
+        
+        // Stop keystroke monitoring and destroy event tap
+        stopSwitchingModeKeyMonitoring()
+        destroyEventTap()
         
         DispatchQueue.main.async {
             self.isSwitchingMode = false
@@ -286,7 +318,265 @@ class KeyboardSwitcher: ObservableObject {
         logger.debug("Switching mode timer set for \(switchingModeTimeout) seconds", category: .keyboardSwitching)
     }
     
+    // MARK: - Window Management
+    
+    /// Update window list and assign keys
+    private func updateWindowListAndAssignKeys() {
+        let windows: [WindowInfo]
+        
+        // Use real window data if WindowManager is connected, otherwise use mock data for testing
+        if let windowManager = windowManager {
+            windows = windowManager.openWindows
+            logger.info("Using real window data: \(windows.count) windows", category: .keyboardSwitching)
+        } else {
+            windows = KeyAssignmentManager.generateMockWindows()
+            logger.info("Using mock window data: \(windows.count) windows", category: .keyboardSwitching)
+        }
+        
+        DispatchQueue.main.async {
+            self.availableWindows = windows
+        }
+        
+        // Assign keys to windows
+        keyAssignmentManager.assignKeys(to: windows)
+        
+        // Log the assignments
+        let assignments = keyAssignmentManager.getAllAssignments()
+        logger.info("Key assignments for \(windows.count) windows:", category: .keyboardSwitching)
+        
+        for window in windows {
+            if let key = keyAssignmentManager.getKey(for: window.id) {
+                logger.info("  '\(key)' → \(window.displayName) (\(window.owner))", category: .keyboardSwitching)
+            }
+        }
+    }
+    
+    /// Get window for a pressed key
+    func getWindow(for key: String) -> WindowInfo? {
+        guard let windowID = keyAssignmentManager.getWindowID(for: key) else {
+            return nil
+        }
+        
+        return availableWindows.first { $0.id == windowID }
+    }
+    
+    /// Get all current key assignments
+    func getKeyAssignments() -> [CGWindowID: String] {
+        return keyAssignmentManager.getAllAssignments()
+    }
+    
+    // MARK: - Testing Support
+    
+    /// Generate test windows for development/debugging
+    func generateTestWindows() -> [WindowInfo] {
+        return KeyAssignmentManager.generateMockWindows()
+    }
+    
+    // MARK: - Switching Mode Key Monitoring
+    
+    /// Create CGEvent tap to capture input system-wide
+    private func createEventTap() {
+        // Create the event tap
+        let eventMask = (1 << CGEventType.keyDown.rawValue)
+        
+        eventTap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: CGEventMask(eventMask),
+            callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
+                // Get the KeyboardSwitcher instance from refcon
+                let keyboardSwitcher = Unmanaged<KeyboardSwitcher>.fromOpaque(refcon!).takeUnretainedValue()
+                return keyboardSwitcher.handleEventTapCallback(proxy: proxy, type: type, event: event)
+            },
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        )
+        
+        guard let eventTap = eventTap else {
+            logger.error("Failed to create CGEvent tap - accessibility permissions may be required", category: .keyboardSwitching)
+            return
+        }
+        
+        // Enable the event tap
+        CGEvent.tapEnable(tap: eventTap, enable: true)
+        
+        // Add to run loop
+        let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
+        
+        logger.info("CGEvent tap created and activated for input capture", category: .keyboardSwitching)
+    }
+    
+    /// Destroy the CGEvent tap
+    private func destroyEventTap() {
+        if let eventTap = eventTap {
+            CGEvent.tapEnable(tap: eventTap, enable: false)
+            CFMachPortInvalidate(eventTap)
+            self.eventTap = nil
+            logger.debug("CGEvent tap destroyed", category: .keyboardSwitching)
+        }
+    }
+    
+    /// Handle CGEvent tap callback for keystroke processing
+    private func handleEventTapCallback(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        // Only process if we're in switching mode
+        guard isSwitchingMode else {
+            return Unmanaged.passUnretained(event) // Pass through
+        }
+        
+        // Handle key down events
+        if type == .keyDown {
+            let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+            let flags = event.flags
+            
+            // Convert to NSEvent for compatibility with existing handling
+            let nsEvent = NSEvent.keyEvent(
+                with: .keyDown,
+                location: NSPoint.zero,
+                modifierFlags: NSEvent.ModifierFlags(rawValue: UInt(flags.rawValue)),
+                timestamp: 0,
+                windowNumber: 0,
+                context: nil,
+                characters: "",
+                charactersIgnoringModifiers: "",
+                isARepeat: false,
+                keyCode: UInt16(keyCode)
+            )
+            
+            if let nsEvent = nsEvent {
+                handleSwitchingModeKeystroke(nsEvent)
+            }
+            
+            // Consume the event (return nil) to prevent it from reaching other applications
+            return nil
+        }
+        
+        // For other event types, pass them through
+        return Unmanaged.passUnretained(event)
+    }
+    
+    /// Start monitoring keystrokes during switching mode
+    private func startSwitchingModeKeyMonitoring() {
+        logger.debug("Starting switching mode keystroke monitoring", category: .keyboardSwitching)
+        
+        // Note: We now rely primarily on the input capture window for key events
+        // This global monitor serves as a backup and for logging
+        switchingModeKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            // Global monitor - this won't consume events but helps with logging
+            self?.logger.debug("Global monitor detected key during switching mode: \(event.keyCode)", category: .keyboardSwitching)
+        }
+        
+        if switchingModeKeyMonitor != nil {
+            logger.info("Switching mode global monitoring active", category: .keyboardSwitching)
+        } else {
+            logger.warning("Failed to start global keystroke monitoring", category: .keyboardSwitching)
+        }
+    }
+    
+    /// Stop monitoring keystrokes during switching mode
+    private func stopSwitchingModeKeyMonitoring() {
+        if let monitor = switchingModeKeyMonitor {
+            NSEvent.removeMonitor(monitor)
+            switchingModeKeyMonitor = nil
+            logger.debug("Stopped switching mode keystroke monitoring", category: .keyboardSwitching)
+        }
+    }
+    
+    /// Handle keystroke during switching mode
+    private func handleSwitchingModeKeystroke(_ event: NSEvent) {
+        let keyString = keyCodeToCharacter(event.keyCode)
+        let modifierFlags = event.modifierFlags
+        
+        logger.debug("Switching mode keystroke: '\(keyString)' (keyCode: \(event.keyCode))", category: .keyboardSwitching)
+        
+        // Filter out system shortcuts and modifiers
+        if shouldIgnoreKeystroke(keyString: keyString, modifierFlags: modifierFlags, keyCode: event.keyCode) {
+            logger.debug("Ignoring keystroke: '\(keyString)' (system shortcut or modifier)", category: .keyboardSwitching)
+            deactivateSwitchingMode()
+            return
+        }
+        
+        // Try to activate window for this key
+        if let window = getWindow(for: keyString.lowercased()) {
+            logger.info("🎯 Activating window for key '\(keyString)': \(window.displayName) (\(window.owner))", category: .keyboardSwitching)
+            activateWindow(window)
+            deactivateSwitchingMode()
+        } else {
+            logger.debug("No window mapped to key '\(keyString)'", category: .keyboardSwitching)
+            // Don't deactivate immediately - user might press another key
+            // The timer will handle deactivation if no valid key is pressed
+        }
+    }
+    
+    /// Determine if a keystroke should be ignored during switching mode
+    private func shouldIgnoreKeystroke(keyString: String, modifierFlags: NSEvent.ModifierFlags, keyCode: UInt16) -> Bool {
+        // Ignore if any significant modifier keys are pressed (except Shift for capital letters)
+        let significantModifiers: NSEvent.ModifierFlags = [.command, .control, .option]
+        if !modifierFlags.intersection(significantModifiers).isEmpty {
+            logger.debug("Ignoring keystroke with modifiers: \(modifierFlags)", category: .keyboardSwitching)
+            return true
+        }
+        
+        // Ignore function keys and special keys
+        if keyCode >= 122 && keyCode <= 135 { // F1-F12 and other function keys
+            logger.debug("Ignoring function key: \(keyCode)", category: .keyboardSwitching)
+            return true
+        }
+        
+        // Ignore arrow keys, delete, escape, etc.
+        let systemKeyCodes: Set<UInt16> = [
+            51,  // Delete
+            53,  // Escape
+            123, 124, 125, 126, // Arrow keys
+            115, 116, 117, 119, 121, // Home, Page Up, Delete, End, Page Down
+            71,  // Clear
+            76,  // Enter (numeric keypad)
+            36,  // Return
+            48,  // Tab
+        ]
+        
+        if systemKeyCodes.contains(keyCode) {
+            logger.debug("Ignoring system key: \(keyCode)", category: .keyboardSwitching)
+            return true
+        }
+        
+        return false
+    }
+    
+    /// Activate a window through WindowManager or fallback method
+    private func activateWindow(_ window: WindowInfo) {
+        if let windowManager = windowManager {
+            // Use connected WindowManager for activation
+            logger.info("Activating window via WindowManager: \(window.displayName)", category: .keyboardSwitching)
+            windowManager.activateWindow(window)
+        } else {
+            // Fallback activation method for testing
+            logger.info("Activating window via fallback method: \(window.displayName)", category: .keyboardSwitching)
+            activateWindowFallback(window)
+        }
+    }
+    
+    /// Fallback window activation method
+    private func activateWindowFallback(_ window: WindowInfo) {
+        // Try to find and activate the application
+        if let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == window.owner }) {
+            app.activate(options: .activateIgnoringOtherApps)
+            logger.info("Successfully activated app via fallback: \(window.owner)", category: .keyboardSwitching)
+        } else {
+            logger.warning("Could not find app for fallback activation: \(window.owner)", category: .keyboardSwitching)
+            DispatchQueue.main.async {
+                self.lastError = "Could not activate window: \(window.displayName)"
+            }
+        }
+    }
+    
     // MARK: - Utilities
+    
+    /// Convert key code to character for switching mode
+    private func keyCodeToCharacter(_ keyCode: UInt16) -> String {
+        // Convert to lowercase for consistent matching
+        return keyCodeToString(keyCode).lowercased()
+    }
     
     private func keyCodeToString(_ keyCode: UInt16) -> String {
         switch keyCode {
