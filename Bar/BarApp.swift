@@ -8,6 +8,8 @@
 import SwiftUI
 import AppKit
 
+
+
 @main
 struct BarApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
@@ -20,12 +22,46 @@ struct BarApp: App {
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
-    var dockWindow: NSWindow?
+    var dockWindow: NSPanel?
     var permissionWindow: NSWindow?
+    var settingsWindow: NSWindow?
     private let logger = Logger.shared
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         checkPermissionsAndSetup()
+        setupNotificationObservers()
+    }
+    
+    func setupNotificationObservers() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(openSettingsWindow),
+            name: NSNotification.Name("OpenSettings"),
+            object: nil
+        )
+    }
+    
+    @objc func openSettingsWindow() {
+        // Close existing settings window if open
+        settingsWindow?.close()
+        
+        logger.info("Creating settings window", category: .taskbar)
+        
+        let contentView = NSHostingView(rootView: SettingsView())
+        
+        settingsWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 500, height: 400),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        
+        guard let window = settingsWindow else { return }
+        
+        window.contentView = contentView
+        window.title = "Bar Settings"
+        window.center()
+        window.makeKeyAndOrderFront(nil)
     }
     
     func checkPermissionsAndSetup() {
@@ -81,9 +117,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         let contentView = NSHostingView(rootView: ContentView())
         
-        dockWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1200, height: 42),
-            styleMask: [.borderless],
+        // Get screen width to make taskbar full width
+        let screenWidth = NSScreen.main?.visibleFrame.width ?? 1200
+        
+        dockWindow = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: screenWidth - 10, height: 42),
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
@@ -93,17 +132,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.contentView = contentView
         window.backgroundColor = NSColor.clear
         window.isOpaque = false
-        window.hasShadow = true
+        window.hasShadow = false
         window.level = .floating
-        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .transient]
         window.isMovableByWindowBackground = false
         
-        // Position at bottom center of screen
+        // Position at bottom of screen, full width
         if let screen = NSScreen.main {
             let screenFrame = screen.visibleFrame
-            let windowFrame = window.frame
-            let x = screenFrame.midX - windowFrame.width / 2
-            let y = screenFrame.minY + 10
+            let x = screenFrame.minX + 5
+            let y = screenFrame.minY + 5
             window.setFrameOrigin(NSPoint(x: x, y: y))
         }
         

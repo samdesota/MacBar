@@ -19,20 +19,12 @@ struct TaskbarView: View {
     @ObservedObject var windowManager: WindowManager
     @StateObject private var logger = Logger.shared
     @State private var showLogControls = false
+    @State private var showSettings = false
     
     var body: some View {
         ZStack {
             // Main taskbar
             HStack(spacing: 2) {
-                // Start button (like Windows)
-                StartButton(windowManager: windowManager)
-                
-                // Separator
-                Rectangle()
-                    .fill(Color.gray.opacity(0.3))
-                    .frame(width: 1, height: 30)
-                    .padding(.horizontal, 8)
-                
                 // Window list
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 2) {
@@ -61,8 +53,22 @@ struct TaskbarView: View {
                 .buttonStyle(PlainButtonStyle())
                 .help("Toggle logging controls")
                 
-                // System tray area (right side)
-                SystemTrayArea()
+                // Settings button
+                Button(action: {
+                    showSettings.toggle()
+                    openSettingsWindow()
+                }) {
+                    Image(systemName: "gearshape.fill")
+                        .font(.system(size: 14))
+                        .foregroundColor(.primary)
+                        .frame(width: 32, height: 32)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(Color.clear)
+                        )
+                }
+                .buttonStyle(PlainButtonStyle())
+                .help("Open Settings")
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
@@ -132,32 +138,10 @@ struct TaskbarView: View {
             }
         }
     }
-}
-
-struct StartButton: View {
-    @State private var isHovered = false
-    @ObservedObject var windowManager: WindowManager
     
-    var body: some View {
-        Button(action: {
-            // Check permissions and refresh window list
-            windowManager.checkAccessibilityPermission()
-            windowManager.updateWindowList()
-        }) {
-            Image(systemName: "applelogo")
-                .font(.system(size: 16, weight: .medium))
-                .foregroundColor(.primary)
-                .frame(width: 32, height: 32)
-                .background(
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(isHovered ? Color.primary.opacity(0.1) : Color.clear)
-                )
-        }
-        .buttonStyle(PlainButtonStyle())
-        .onHover { hovering in
-            isHovered = hovering
-        }
-        .help("Click to refresh window list and check permissions")
+    private func openSettingsWindow() {
+        // Post notification to AppDelegate to create settings window
+        NotificationCenter.default.post(name: NSNotification.Name("OpenSettings"), object: nil)
     }
 }
 
@@ -165,9 +149,11 @@ struct WindowButton: View {
     let window: WindowInfo
     @ObservedObject var windowManager: WindowManager
     @State private var isHovered = false
+    @StateObject private var logger = Logger.shared
     
     var body: some View {
         Button(action: {
+            logger.info("Clicked window button for: \(window.displayName)", category: .taskbar)
             windowManager.activateWindow(window)
         }) {
             HStack(spacing: 6) {
@@ -228,35 +214,26 @@ struct WindowButton: View {
     }
 }
 
-struct SystemTrayArea: View {
+struct SettingsView: View {
     var body: some View {
-        HStack(spacing: 8) {
-            // Clock
-            Text(Date(), style: .time)
-                .font(.system(size: 11))
-                .foregroundColor(.primary)
+        VStack(spacing: 20) {
+            Text("Settings")
+                .font(.largeTitle)
+                .fontWeight(.bold)
             
-            // Battery indicator
-            Image(systemName: "battery.100")
-                .font(.system(size: 12))
-                .foregroundColor(.green)
+            Spacer()
             
-            // WiFi indicator
-            Image(systemName: "wifi")
-                .font(.system(size: 12))
-                .foregroundColor(.primary)
+            Text("Settings options will be added here")
+                .foregroundColor(.secondary)
+            
+            Spacer()
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(
-            RoundedRectangle(cornerRadius: 4)
-                .fill(Color.clear)
-        )
+        .padding(40)
     }
 }
 
 #Preview {
     ContentView()
-        .frame(width: 800, height: 42)
+        .frame(width: 1200, height: 42)
         .background(Color.black.opacity(0.1))
 }

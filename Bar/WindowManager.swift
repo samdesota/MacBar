@@ -35,7 +35,7 @@ class WindowManager: ObservableObject {
         // Calculate taskbar position based on screen
         if let screen = NSScreen.main {
             let screenFrame = screen.visibleFrame
-            taskbarY = screenFrame.maxY - 10 // Same as in BarApp.swift
+            taskbarY = screenFrame.maxY - 5 // Same as in BarApp.swift
             logger.info("Taskbar positioned at Y: \(taskbarY), height: \(taskbarHeight)", category: .windowPositioning)
         }
     }
@@ -212,7 +212,7 @@ class WindowManager: ObservableObject {
                         logger.info("Window \(windowOwner) bottom (\(windowBottom)) overlaps with taskbar area (starts at \(taskbarY))", category: .windowPositioning)
                         
                         // Calculate new height to avoid taskbar overlap
-                        let newHeight = taskbarY - currentPos.y - 5 // 5px gap above taskbar
+                        let newHeight = taskbarY - currentPos.y - 5
                 
                         // Ensure minimum window size
                         let minHeight: CGFloat = 200
@@ -389,9 +389,17 @@ class WindowManager: ObservableObject {
     }
     
     func activateWindow(_ windowInfo: WindowInfo) {
-        // Find and activate the app
-        if let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == windowInfo.owner }) {
-            app.activate(options: .activateIgnoringOtherApps)
+        logger.info("Attempting to activate app: \(windowInfo.owner)", category: .taskbar)
+        
+        // Add small delay to avoid timing issues with panel focus
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            // Find and activate the app
+            if let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == windowInfo.owner }) {
+                app.activate(options: .activateIgnoringOtherApps)
+                self.logger.info("Successfully activated app: \(windowInfo.owner)", category: .taskbar)
+            } else {
+                self.logger.error("Could not find running app: \(windowInfo.owner)", category: .taskbar)
+            }
         }
     }
     
