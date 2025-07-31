@@ -35,7 +35,7 @@ class WindowManager: ObservableObject {
         // Calculate taskbar position based on screen
         if let screen = NSScreen.main {
             let screenFrame = screen.visibleFrame
-            taskbarY = screenFrame.minY + 10 // Same as in BarApp.swift
+            taskbarY = screenFrame.maxY - 10 // Same as in BarApp.swift
             logger.info("Taskbar positioned at Y: \(taskbarY), height: \(taskbarHeight)", category: .windowPositioning)
         }
     }
@@ -125,12 +125,26 @@ class WindowManager: ObservableObject {
             // Check if window overlaps with taskbar area
             if windowBottom < taskbarTop && windowTop > taskbarY {
                 logger.info("Window \(windowOwner) overlaps taskbar - adjusting position", category: .windowPositioning)
-                adjustWindowPosition(windowID: windowID, currentY: y, currentHeight: height)
+                
+                // Try multiple approaches to move the window
+                if !adjustWindowPosition(windowID: windowID, currentY: y, currentHeight: height) {
+                    // Fallback: try to activate the app and bring it to front
+                    logger.info("Trying fallback method for \(windowOwner)", category: .windowPositioning)
+                    activateAppToBringWindowToFront(windowOwner: windowOwner)
+                }
             }
         }
     }
     
-    private func adjustWindowPosition(windowID: CGWindowID, currentY: Double, currentHeight: Double) {
+    private func activateAppToBringWindowToFront(windowOwner: String) {
+        // Try to activate the app, which might bring its windows to a better position
+        if let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == windowOwner }) {
+            app.activate(options: .activateIgnoringOtherApps)
+            logger.info("Activated app \(windowOwner) as fallback", category: .windowPositioning)
+        }
+    }
+    
+    private func adjustWindowPosition(windowID: CGWindowID, currentY: Double, currentHeight: Double) -> Bool {
         logger.debug("Attempting to adjust window position for ID: \(windowID), currentY: \(currentY)", category: .windowPositioning)
         
         // Find the app that owns this window
@@ -140,7 +154,7 @@ class WindowManager: ObservableObject {
         guard let windowOwner = windowList.first?[kCGWindowOwnerName as String] as? String,
               let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == windowOwner }) else {
             logger.error("Could not find app for window ID: \(windowID)", category: .windowPositioning)
-            return
+            return false
         }
         
         logger.debug("Found app: \(windowOwner) with PID: \(app.processIdentifier)", category: .windowPositioning)
@@ -152,9 +166,21 @@ class WindowManager: ObservableObject {
         var axWindows: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &axWindows)
         
-        guard result == .success, let windows = axWindows as? [AXUIElement] else {
-            logger.error("Failed to get windows for app \(windowOwner), result: \(result.rawValue)", category: .windowPositioning)
-            return
+        if result != .success {
+            let errorMessage = getAXErrorMessage(result)
+            logger.warning("Failed to get windows for app \(windowOwner), result: \(result.rawValue) (\(errorMessage))", category: .windowPositioning)
+            
+            // If it's a trust issue, we can't move this window
+            if result.rawValue == -25204 { // kAXErrorNotTrusted
+                logger.info("Skipping window adjustment for \(windowOwner) - not trusted", category: .windowPositioning)
+                return false
+            }
+            return false
+        }
+        
+        guard let windows = axWindows as? [AXUIElement] else {
+            logger.error("Failed to cast windows array for app \(windowOwner)", category: .windowPositioning)
+            return false
         }
         
         logger.debug("Found \(windows.count) windows for app \(windowOwner)", category: .windowPositioning)
@@ -168,30 +194,86 @@ class WindowManager: ObservableObject {
                 var currentPos = CGPoint.zero
                 AXValueGetValue(posValue as! AXValue, .cgPoint, &currentPos)
                 
-                logger.debug("Window \(index) position: (\(currentPos.x), \(currentPos.y))", category: .windowPositioning)
+                // Get current window size
+                var size: CFTypeRef?
+                let sizeResult = AXUIElementCopyAttributeValue(axWindow, kAXSizeAttribute as CFString, &size)
                 
-                // Check if this window is the one we want to move
-                if abs(currentPos.y - currentY) < 10 { // Within 10px tolerance
-                    // Calculate new position (move window up so it doesn't overlap taskbar)
-                    let newY = taskbarY + taskbarHeight + 5 // Add 5px gap
-                    var newPosition = CGPoint(x: currentPos.x, y: newY)
-                    let newPositionValue = AXValueCreate(.cgPoint, &newPosition)
+                if sizeResult == .success, let sizeValue = size {
+                    var currentSize = CGSize.zero
+                    AXValueGetValue(sizeValue as! AXValue, .cgSize, &currentSize)
                     
-                    if let newPositionValue = newPositionValue {
-                        let setResult = AXUIElementSetAttributeValue(axWindow, kAXPositionAttribute as CFString, newPositionValue)
-                        if setResult == .success {
-                            logger.info("Successfully moved window \(windowOwner) from Y=\(currentPos.y) to Y=\(newY)", category: .windowPositioning)
+                    logger.debug("Window \(index) position: (\(currentPos.x), \(currentPos.y)), size: (\(currentSize.width), \(currentSize.height))", category: .windowPositioning)
+                    
+                    // Calculate window bottom edge
+                    let windowBottom = currentPos.y + currentSize.height
+                    
+                    // Check if the bottom of the window overlaps with the taskbar area
+                    if windowBottom > taskbarY {
+                        logger.info("Window \(windowOwner) bottom (\(windowBottom)) overlaps with taskbar area (starts at \(taskbarY))", category: .windowPositioning)
+                        
+                        // Calculate new height to avoid taskbar overlap
+                        let newHeight = taskbarY - currentPos.y - 5 // 5px gap above taskbar
+                
+                        // Ensure minimum window size
+                        let minHeight: CGFloat = 200
+                        let finalHeight = max(newHeight, minHeight)
+                        
+                        // Only resize the window (keep same position, just change height)
+                        var newSize = CGSize(width: currentSize.width, height: finalHeight)
+                        let newSizeValue = AXValueCreate(.cgSize, &newSize)
+                        
+                        if let newSizeValue = newSizeValue {
+                            let setSizeResult = AXUIElementSetAttributeValue(axWindow, kAXSizeAttribute as CFString, newSizeValue)
+                            if setSizeResult == .success {
+                                logger.info("Successfully resized window \(windowOwner) from height=\(currentSize.height) to height=\(finalHeight)", category: .windowPositioning)
+                                return true
+                            } else {
+                                let errorMessage = getAXErrorMessage(setSizeResult)
+                                logger.error("Failed to resize window \(windowOwner), result: \(setSizeResult.rawValue) (\(errorMessage))", category: .windowPositioning)
+                            }
                         } else {
-                            logger.error("Failed to move window \(windowOwner), result: \(setResult.rawValue)", category: .windowPositioning)
+                            logger.error("Failed to create size value for window \(windowOwner)", category: .windowPositioning)
                         }
-                    } else {
-                        logger.error("Failed to create position value for window \(windowOwner)", category: .windowPositioning)
                     }
-                    break
                 }
             } else {
-                logger.debug("Failed to get position for window \(index), result: \(posResult.rawValue)", category: .windowPositioning)
+                let errorMessage = getAXErrorMessage(posResult)
+                logger.debug("Failed to get position for window \(index), result: \(posResult.rawValue) (\(errorMessage))", category: .windowPositioning)
             }
+        }
+        return false
+    }
+    
+    private func getAXErrorMessage(_ error: AXError) -> String {
+        switch error.rawValue {
+        case 0: // kAXErrorSuccess
+            return "Success"
+        case -25200: // kAXErrorFailure
+            return "Failure"
+        case -25201: // kAXErrorIllegalArgument
+            return "Illegal Argument"
+        case -25202: // kAXErrorInvalidUIElement
+            return "Invalid UI Element"
+        case -25203: // kAXErrorInvalidUIElementObserver
+            return "Invalid UI Element Observer"
+        case -25204: // kAXErrorNotTrusted
+            return "Not Trusted"
+        case -25205: // kAXErrorAttributeUnsupported
+            return "Attribute Unsupported"
+        case -25206: // kAXErrorActionUnsupported
+            return "Action Unsupported"
+        case -25207: // kAXErrorNotificationUnsupported
+            return "Notification Unsupported"
+        case -25208: // kAXErrorNotImplemented
+            return "Not Implemented"
+        case -25209: // kAXErrorApplicationInvalid
+            return "Application Invalid"
+        case -25210: // kAXErrorCannotComplete
+            return "Cannot Complete"
+        case -25211: // kAXErrorAPIDisabled
+            return "API Disabled"
+        default:
+            return "Unknown Error (\(error.rawValue))"
         }
     }
     

@@ -88,17 +88,6 @@ struct TaskbarView: View {
                     .background(Color.orange.opacity(0.2))
                     .cornerRadius(4)
                 }
-                
-                Spacer()
-                
-                HStack {
-                    Text(windowManager.debugInfo)
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                    Spacer()
-                }
-                .padding(.horizontal, 8)
-                .padding(.bottom, 4)
             }
             
             // Logging controls overlay

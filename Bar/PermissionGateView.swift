@@ -64,7 +64,7 @@ struct PermissionGateView: View {
                     }
                     .buttonStyle(PlainButtonStyle())
                     
-                    Text("1. Click 'Open System Preferences' above\n2. Go to 'Privacy & Security' → 'Accessibility'\n3. Click the lock icon and enter your password\n4. Check the box next to 'Bar'")
+                    Text("1. Click 'Open System Preferences' above\n2. Go to 'Privacy & Security' → 'Accessibility'\n3. Click the lock icon and enter your password\n4. Check the box next to 'Bar' (should appear automatically)")
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
@@ -96,7 +96,8 @@ struct PermissionGateView: View {
     }
     
     private func checkPermission() {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false]
+        // Use prompt option to automatically add app to accessibility permissions
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
         let permission = AXIsProcessTrustedWithOptions(options as CFDictionary)
         
         DispatchQueue.main.async {

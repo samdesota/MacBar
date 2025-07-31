@@ -26,7 +26,7 @@ class Logger: ObservableObject {
     
     private init() {
         // Enable accessibility and window positioning logging by default for debugging
-        enabledCategories = [.accessibility, .windowPositioning]
+        enabledCategories = []
     }
     
     func enableCategory(_ category: LogCategory) {

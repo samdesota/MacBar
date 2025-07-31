@@ -29,7 +29,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func checkPermissionsAndSetup() {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false]
+        // Use prompt option to automatically add app to accessibility permissions
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
         let hasPermission = AXIsProcessTrustedWithOptions(options as CFDictionary)
         
         logger.info("Initial permission check: \(hasPermission)", category: .accessibility)
@@ -62,7 +63,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Close the permission window when permissions are granted
         Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
-            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false]
+            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
             let hasPermission = AXIsProcessTrustedWithOptions(options as CFDictionary)
             
             if hasPermission {
