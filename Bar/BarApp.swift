@@ -22,12 +22,15 @@ struct BarApp: App {
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
-    var dockWindow: NSPanel?
+    var dockWindow: NSWindow?
     var permissionWindow: NSWindow?
     var settingsWindow: NSWindow?
     private let logger = Logger.shared
     
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Hide app from dock
+        NSApp.setActivationPolicy(.accessory)
+        
         checkPermissionsAndSetup()
         setupNotificationObservers()
     }
@@ -120,9 +123,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Get screen width to make taskbar full width
         let screenWidth = NSScreen.main?.visibleFrame.width ?? 1200
         
-        dockWindow = NSPanel(
+        dockWindow = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: screenWidth - 10, height: 42),
-            styleMask: [.borderless, .nonactivatingPanel],
+            styleMask: [.borderless],
             backing: .buffered,
             defer: false
         )

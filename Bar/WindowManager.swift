@@ -9,13 +9,14 @@ import SwiftUI
 import AppKit
 import Combine
 import ApplicationServices
+import Darwin
 
 class WindowManager: ObservableObject {
     @Published var openWindows: [WindowInfo] = []
     @Published var hasAccessibilityPermission: Bool = false
     @Published var debugInfo: String = ""
     private var timer: Timer?
-    private var windowOrder: [String] = [] // Track order by app name
+    private var windowOrder: [CGWindowID] = [] // Track order by window ID
     private var taskbarHeight: CGFloat = 42
     private var taskbarY: CGFloat = 0
     private let logger = Logger.shared
@@ -279,7 +280,7 @@ class WindowManager: ObservableObject {
     
     private func getVisibleWindows() -> [WindowInfo] {
         var windowInfos: [WindowInfo] = []
-        var newWindowOrder: [String] = []
+        var newWindowOrder: [CGWindowID] = []
         
         // Get all windows
         let options = CGWindowListOption(arrayLiteral: .optionOnScreenOnly, .excludeDesktopElements)
@@ -318,51 +319,86 @@ class WindowManager: ObservableObject {
             // Get app icon
             let appIcon = getAppIcon(for: windowOwner)
             
+            // Try to get a better window title from Accessibility API
+            let betterWindowName = getBetterWindowTitle(for: windowID, owner: windowOwner, fallbackName: windowName)
+            
             let windowInfo = WindowInfo(
                 id: windowID,
-                name: windowName,
+                name: betterWindowName,
                 owner: windowOwner,
                 icon: appIcon,
                 isActive: isWindowActive(windowID)
             )
             
-            // Avoid duplicates based on owner only (since window names might be empty)
-            if !windowInfos.contains(where: { $0.owner == windowInfo.owner }) {
+            // Add each window individually (no more filtering by owner)
+            if !windowInfos.contains(where: { $0.id == windowInfo.id }) {
                 windowInfos.append(windowInfo)
-                newWindowOrder.append(windowOwner)
-                logger.debug("Added window: \(windowOwner) - \(windowName)", category: .windowManager)
+                newWindowOrder.append(windowID)
+                logger.debug("Added window: \(windowOwner) - \(windowName) (ID: \(windowID))", category: .windowManager)
             }
         }
         
         // Maintain stable order: existing windows keep their position, new windows go to the end
-        let orderedWindows = maintainStableOrder(currentWindows: windowInfos, newOrder: newWindowOrder)
+        let orderedWindows = maintainStableOrderByWindow(currentWindows: windowInfos, newOrder: newWindowOrder)
         
-        return orderedWindows
+        // Update display names based on whether there are multiple windows per app
+        let finalWindows = updateDisplayNamesForMultipleWindows(orderedWindows)
+        
+        return finalWindows
     }
     
-    private func maintainStableOrder(currentWindows: [WindowInfo], newOrder: [String]) -> [WindowInfo] {
+    private func maintainStableOrderByWindow(currentWindows: [WindowInfo], newOrder: [CGWindowID]) -> [WindowInfo] {
         var orderedWindows: [WindowInfo] = []
-        var usedOwners: Set<String> = []
+        var usedWindowIDs: Set<CGWindowID> = []
         
         // First, add existing windows in their current order
         for window in openWindows {
-            if let newWindow = currentWindows.first(where: { $0.owner == window.owner }) {
+            if let newWindow = currentWindows.first(where: { $0.id == window.id }) {
                 orderedWindows.append(newWindow)
-                usedOwners.insert(window.owner)
+                usedWindowIDs.insert(window.id)
             }
         }
         
         // Then add any new windows to the end
-        for owner in newOrder {
-            if !usedOwners.contains(owner) {
-                if let newWindow = currentWindows.first(where: { $0.owner == owner }) {
+        for windowID in newOrder {
+            if !usedWindowIDs.contains(windowID) {
+                if let newWindow = currentWindows.first(where: { $0.id == windowID }) {
                     orderedWindows.append(newWindow)
-                    usedOwners.insert(owner)
+                    usedWindowIDs.insert(windowID)
                 }
             }
         }
         
         return orderedWindows
+    }
+    
+    private func updateDisplayNamesForMultipleWindows(_ windows: [WindowInfo]) -> [WindowInfo] {
+        // Group windows by app owner
+        let windowsByApp = Dictionary(grouping: windows) { $0.owner }
+        
+        // Create new window infos with updated display logic
+        var updatedWindows: [WindowInfo] = []
+        
+        for window in windows {
+            let windowsForThisApp = windowsByApp[window.owner] ?? []
+            let hasMultipleWindows = windowsForThisApp.count > 1
+            
+            // Create a new WindowInfo with potentially different display behavior
+            let updatedWindow = WindowInfo(
+                id: window.id,
+                name: window.name,
+                owner: window.owner,
+                icon: window.icon,
+                isActive: window.isActive,
+                forceShowTitle: hasMultipleWindows
+            )
+            
+            updatedWindows.append(updatedWindow)
+            
+            logger.debug("Window \(window.owner) - \(window.name): hasMultiple=\(hasMultipleWindows), displayName='\(updatedWindow.displayName)'", category: .windowManager)
+        }
+        
+        return updatedWindows
     }
     
     private func getAppIcon(for appName: String) -> NSImage? {
@@ -389,18 +425,231 @@ class WindowManager: ObservableObject {
     }
     
     func activateWindow(_ windowInfo: WindowInfo) {
-        logger.info("Attempting to activate app: \(windowInfo.owner)", category: .taskbar)
+        logger.info("Attempting to activate window: \(windowInfo.displayName) (\(windowInfo.owner))", category: .taskbar)
         
-        // Add small delay to avoid timing issues with panel focus
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            // Find and activate the app
+        // Try to focus the specific window first
+        if self.focusSpecificWindow(windowInfo) {
+            self.logger.info("Successfully focused specific window: \(windowInfo.displayName)", category: .taskbar)
+        } else {
+            // Fall back to activating the app
             if let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == windowInfo.owner }) {
                 app.activate(options: .activateIgnoringOtherApps)
-                self.logger.info("Successfully activated app: \(windowInfo.owner)", category: .taskbar)
+                self.logger.info("Successfully activated app: \(app.localizedName)", category: .taskbar)
             } else {
                 self.logger.error("Could not find running app: \(windowInfo.owner)", category: .taskbar)
             }
         }
+    }
+    
+    private func focusSpecificWindow(_ windowInfo: WindowInfo) -> Bool {
+        guard hasAccessibilityPermission else {
+            logger.debug("Cannot focus specific window - no accessibility permission", category: .taskbar)
+            return false
+        }
+        
+        // Find the app that owns this window
+        guard let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == windowInfo.owner }) else {
+            logger.error("Could not find app for window: \(windowInfo.displayName)", category: .taskbar)
+            return false
+        }
+        
+        logger.info("Attempting to focus window - Target: '\(windowInfo.name)' (DisplayName: '\(windowInfo.displayName)') in app: \(windowInfo.owner) (PID: \(app.processIdentifier))", category: .taskbar)
+        
+        // Get the AXUIElement for the application
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        
+        // Get all windows of this application
+        var axWindows: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &axWindows)
+        
+        if result != .success {
+            let errorMessage = getAXErrorMessage(result)
+            logger.warning("Failed to get windows for app \(windowInfo.owner), result: \(result.rawValue) (\(errorMessage))", category: .taskbar)
+            return false
+        }
+        
+        guard let windows = axWindows as? [AXUIElement] else {
+            logger.error("Failed to cast windows array for app \(windowInfo.owner)", category: .taskbar)
+            return false
+        }
+        
+        logger.info("Found \(windows.count) AX windows for app \(windowInfo.owner), searching for match...", category: .taskbar)
+        
+        // Try to find and focus the specific window by ID
+        for (index, axWindow) in windows.enumerated() {
+            // Try to get the window ID from the AX window
+            if let axWindowID = getWindowIDFromAXWindow(axWindow) {
+                let isMatch = axWindowID == windowInfo.id
+                
+                // Also get the title for debugging
+                var title: CFTypeRef?
+                let titleResult = AXUIElementCopyAttributeValue(axWindow, kAXTitleAttribute as CFString, &title)
+                let windowTitle = (titleResult == .success) ? (title as? String ?? "<no title>") : "<failed to get title>"
+                
+                logger.info("AX Window \(index): ID=\(axWindowID) Title='\(windowTitle)' vs Target ID=\(windowInfo.id) - Match: \(isMatch)", category: .taskbar)
+                
+                // Check if this is our target window (match by ID)
+                if isMatch {
+                    logger.info("Found matching window by ID! Attempting to activate and raise...", category: .taskbar)
+                    
+                    // Activate the app first
+                    app.activate(options: .activateIgnoringOtherApps)
+
+                    logger.info("Successfully activated app: \(app.localizedName)", category: .taskbar)
+                    
+                    // Then try to raise this specific window
+                    let raiseResult = AXUIElementPerformAction(axWindow, kAXRaiseAction as CFString)
+                    
+                    if raiseResult == .success {
+                        logger.info("Successfully raised window: \(windowInfo.displayName)", category: .taskbar)
+                        return true
+                    } else {
+                        let errorMessage = getAXErrorMessage(raiseResult)
+                        logger.warning("Failed to raise window: \(windowInfo.displayName), result: \(raiseResult.rawValue) (\(errorMessage))", category: .taskbar)
+                    }
+                }
+            } else {
+                logger.debug("Failed to get window ID for AX window \(index)", category: .taskbar)
+            }
+        }
+        
+        logger.warning("Could not find matching AX window for: '\(windowInfo.name)' (DisplayName: '\(windowInfo.displayName)') in app: \(windowInfo.owner)", category: .taskbar)
+        return false
+    }
+    
+    private func getWindowIDFromAXWindow(_ axWindow: AXUIElement) -> CGWindowID? {
+        // Try method 1: Use the undocumented _AXUIElementGetWindow function
+        if let windowID = getWindowIDViaPrivateAPI(axWindow) {
+            return windowID
+        }
+        
+        // Try method 2: Match by window bounds
+        if let windowID = getWindowIDViaPositionMatching(axWindow) {
+            return windowID
+        }
+        
+        return nil
+    }
+    
+    private func getWindowIDViaPrivateAPI(_ axWindow: AXUIElement) -> CGWindowID? {
+        // This uses a private API function that directly gives us the CGWindowID
+        // It's undocumented but widely used in accessibility tools
+        let getWindowFunc = unsafeBitCast(
+            dlsym(dlopen("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices", RTLD_LAZY), "_AXUIElementGetWindow"),
+            to: (@convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> AXError).self
+        )
+        
+        var windowID: CGWindowID = 0
+        let result = getWindowFunc(axWindow, &windowID)
+        
+        if result == .success && windowID != 0 {
+            return windowID
+        }
+        
+        logger.debug("Private API method failed with result: \(result.rawValue)", category: .taskbar)
+        return nil
+    }
+    
+    private func getWindowIDViaPositionMatching(_ axWindow: AXUIElement) -> CGWindowID? {
+        // Get the position and size of the AX window
+        var position: CFTypeRef?
+        var size: CFTypeRef?
+        
+        let posResult = AXUIElementCopyAttributeValue(axWindow, kAXPositionAttribute as CFString, &position)
+        let sizeResult = AXUIElementCopyAttributeValue(axWindow, kAXSizeAttribute as CFString, &size)
+        
+        guard posResult == .success && sizeResult == .success,
+              let posValue = position, let sizeValue = size else {
+            logger.debug("Failed to get position/size for AX window", category: .taskbar)
+            return nil
+        }
+        
+        var axPos = CGPoint.zero
+        var axSize = CGSize.zero
+        AXValueGetValue(posValue as! AXValue, .cgPoint, &axPos)
+        AXValueGetValue(sizeValue as! AXValue, .cgSize, &axSize)
+        
+        logger.debug("AX window bounds: (\(axPos.x), \(axPos.y), \(axSize.width), \(axSize.height))", category: .taskbar)
+        
+        // Now find a Core Graphics window with matching bounds
+        let options = CGWindowListOption(arrayLiteral: .optionOnScreenOnly, .excludeDesktopElements)
+        let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] ?? []
+        
+        for windowDict in windowList {
+            guard let windowID = windowDict[kCGWindowNumber as String] as? CGWindowID,
+                  let windowBounds = windowDict[kCGWindowBounds as String] as? [String: Any],
+                  let x = windowBounds["X"] as? Double,
+                  let y = windowBounds["Y"] as? Double,
+                  let width = windowBounds["Width"] as? Double,
+                  let height = windowBounds["Height"] as? Double else {
+                continue
+            }
+            
+            // Allow for small differences in position/size (within 5 pixels)
+            let tolerance: Double = 5.0
+            if abs(axPos.x - x) < tolerance &&
+               abs(axPos.y - y) < tolerance &&
+               abs(axSize.width - width) < tolerance &&
+               abs(axSize.height - height) < tolerance {
+                logger.debug("Found matching window by bounds: ID=\(windowID)", category: .taskbar)
+                return windowID
+            }
+        }
+        
+        logger.debug("No matching window found by bounds", category: .taskbar)
+        return nil
+    }
+    
+    private func getBetterWindowTitle(for windowID: CGWindowID, owner: String, fallbackName: String) -> String {
+        // If we don't have accessibility permission, just use the fallback
+        guard hasAccessibilityPermission else {
+            logger.debug("No accessibility permission - using fallback name for window \(windowID)", category: .windowManager)
+            return fallbackName
+        }
+        
+        // If fallback is already meaningful and different from owner, use it
+        if !fallbackName.isEmpty && fallbackName != owner {
+            return fallbackName
+        }
+        
+        // Find the app that owns this window
+        guard let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == owner }) else {
+            logger.debug("Could not find app \(owner) for window \(windowID)", category: .windowManager)
+            return fallbackName
+        }
+        
+        // Get the AXUIElement for the application
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        
+        // Get all windows of this application
+        var axWindows: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &axWindows)
+        
+        guard result == .success, let windows = axWindows as? [AXUIElement] else {
+            logger.debug("Failed to get AX windows for app \(owner)", category: .windowManager)
+            return fallbackName
+        }
+        
+        // Try to find the specific window by ID and get its title
+        for axWindow in windows {
+            if let axWindowID = getWindowIDFromAXWindow(axWindow), axWindowID == windowID {
+                // Found the matching window, get its title
+                var title: CFTypeRef?
+                let titleResult = AXUIElementCopyAttributeValue(axWindow, kAXTitleAttribute as CFString, &title)
+                
+                if titleResult == .success, let windowTitle = title as? String {
+                    // Only use the AX title if it's meaningful (not empty and not same as app name)
+                    if !windowTitle.isEmpty && windowTitle != owner {
+                        logger.debug("Got better window title via AX API: '\(windowTitle)' (was: '\(fallbackName)')", category: .windowManager)
+                        return windowTitle
+                    }
+                }
+                break
+            }
+        }
+        
+        logger.debug("Could not get better title via AX API for window \(windowID), using fallback: '\(fallbackName)'", category: .windowManager)
+        return fallbackName
     }
     
     func minimizeWindow(_ windowInfo: WindowInfo) {
@@ -416,13 +665,35 @@ struct WindowInfo: Identifiable, Equatable {
     let owner: String
     let icon: NSImage?
     let isActive: Bool
+    let forceShowTitle: Bool
+    
+    init(id: CGWindowID, name: String, owner: String, icon: NSImage?, isActive: Bool, forceShowTitle: Bool = false) {
+        self.id = id
+        self.name = name
+        self.owner = owner
+        self.icon = icon
+        self.isActive = isActive
+        self.forceShowTitle = forceShowTitle
+    }
     
     var displayName: String {
-        // Show app name if window name is generic or empty
-        if name.isEmpty || name == owner {
+        // If forceShowTitle is true (multiple windows from same app), always try to show window title
+        if forceShowTitle {
+            if !name.isEmpty && name != owner {
+                // Truncate long window titles
+                let maxLength = 50
+                if name.count > maxLength {
+                    return String(name.prefix(maxLength)) + "..."
+                }
+                return name
+            } else {
+                // Even with forceShowTitle, if no meaningful title, show app name with index
+                return owner
+            }
+        } else {
+            // Single window - just show app name for simplicity
             return owner
         }
-        return name
     }
     
     static func == (lhs: WindowInfo, rhs: WindowInfo) -> Bool {
