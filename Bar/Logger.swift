@@ -18,6 +18,7 @@ class Logger: ObservableObject {
         case taskbar = "Taskbar"
         case general = "General"
         case debug = "Debug"
+        case keyboardSwitching = "KeyboardSwitching"
     }
     
     @Published var enabledCategories: Set<LogCategory> = []

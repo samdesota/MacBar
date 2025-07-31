@@ -26,6 +26,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var permissionWindow: NSWindow?
     var settingsWindow: NSWindow?
     private let logger = Logger.shared
+    private let keyboardSwitcher = KeyboardSwitcher.shared
+    private let keyboardPermissionManager = KeyboardPermissionManager.shared
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Hide app from dock
@@ -118,6 +120,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func createDockWindow() {
         logger.info("Creating taskbar window", category: .taskbar)
         
+        // Start keyboard switching functionality after window is created
+        initializeKeyboardSwitching()
+        
         let contentView = NSHostingView(rootView: ContentView())
         
         // Get screen width to make taskbar full width
@@ -149,5 +154,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         
         window.makeKeyAndOrderFront(nil)
+    }
+    
+    private func initializeKeyboardSwitching() {
+        logger.info("Initializing keyboard switching functionality", category: .keyboardSwitching)
+        
+        // Start permission monitoring
+        keyboardPermissionManager.startPermissionMonitoring()
+        
+        // Check if we have permissions and start keyboard switcher
+        if keyboardPermissionManager.hasAllRequiredPermissions {
+            logger.info("All permissions available - starting keyboard switcher", category: .keyboardSwitching)
+            keyboardSwitcher.start()
+        } else {
+            logger.warning("Missing keyboard permissions - will monitor until available", category: .keyboardSwitching)
+            
+            // Monitor for permission changes and start switcher when ready
+            Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
+                guard let self = self else {
+                    timer.invalidate()
+                    return
+                }
+                
+                if self.keyboardPermissionManager.hasAllRequiredPermissions && !self.keyboardSwitcher.isActive {
+                    self.logger.info("Permissions now available - starting keyboard switcher", category: .keyboardSwitching)
+                    self.keyboardSwitcher.start()
+                    timer.invalidate()
+                }
+            }
+        }
     }
 }
