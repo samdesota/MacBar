@@ -62,16 +62,57 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
         }
     }
     
+    func refreshWindowObservers() {
+        logger.info("Manually refreshing window observers", category: .windowManager)
+        nativeBridge.refreshWindowObservers()
+    }
+    
+    func printObserverStatus() {
+        nativeBridge.printObserverStatus()
+    }
+    
+    func testWindowDetection() {
+        logger.info("🧪 Manual window detection test", category: .windowManager)
+        updateWindowList()
+        printObserverStatus()
+    }
+    
+    func testFinderDetection() {
+        logger.info("🗂️ Testing Finder window detection", category: .windowManager)
+        refreshWindowObservers() // This will now include Finder
+        printObserverStatus()
+        
+        // Check if Finder windows are being detected
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            let finderWindows = self.openWindows.filter { $0.owner == "Finder" }
+            self.logger.info("📁 Found \(finderWindows.count) Finder windows", category: .windowManager)
+            for window in finderWindows {
+                self.logger.info("  - \(window.displayName) (ID: \(window.id))", category: .windowManager)
+            }
+        }
+    }
+    
     func startMonitoring() {
         logger.info("Starting window monitoring", category: .windowManager)
         // Update immediately
         updateWindowList()
         
-        // Set up timer for periodic updates (now much less frequent since we have instant KVO updates)
-        timer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
+        // Set up timer for periodic updates (safety net only - window observers handle real-time updates)
+        timer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
             self?.checkAccessibilityPermission()
-            self?.updateWindowList() // Full window list refresh every 5 seconds
+            self?.updateWindowList() // Full window list refresh every 5 minutes as safety net
             self?.preventTaskbarOverlap()
+        }
+        
+        // Refresh observers after a delay to ensure everything is set up properly
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self?.logger.info("🔄 Initial observer refresh after startup delay", category: .windowManager)
+            self?.refreshWindowObservers()
+            
+            // Print status for debugging
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                self?.printObserverStatus()
+            }
         }
     }
     
@@ -97,6 +138,16 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
     func onWindowListChanged() {
         logger.info("📋 Window list changed", category: .windowManager)
         updateWindowList()
+    }
+    
+    func onAppLaunched(app: NSRunningApplication) {
+        logger.info("🚀 Detected app launch: \(app.localizedName ?? "Unknown")", category: .windowManager)
+        // Window list will be updated via onWindowListChanged()
+    }
+    
+    func onAppTerminated(app: NSRunningApplication) {
+        logger.info("🛑 Detected app termination: \(app.localizedName ?? "Unknown")", category: .windowManager)
+        // Window list will be updated via onWindowListChanged()
     }
     
     /// Fast update of just the focus status for existing windows (reactive)
@@ -243,8 +294,6 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
         }
     }
     
-
-    
     private func getVisibleWindows() -> [WindowInfo] {
         var windowInfos: [WindowInfo] = []
         var newWindowOrder: [CGWindowID] = []
@@ -342,16 +391,10 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
         return updatedWindows
     }
     
-
-    
     private func isWindowActive(_ windowID: CGWindowID) -> Bool {
         let focusedID = nativeBridge.getFocusedWindowID()
         return focusedID == windowID
     }
-    
-
-    
-
     
     private func getWindowOwner(_ windowID: CGWindowID) -> String? {
         let options = CGWindowListOption(arrayLiteral: .optionIncludingWindow)
@@ -381,12 +424,6 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
             logger.error("Window not found: \(windowInfo.displayName)", category: .taskbar)
         }
     }
-    
-
-    
-
-    
-
     
     func minimizeWindow(_ windowInfo: WindowInfo) {
         logger.info("Attempting to minimize window: \(windowInfo.displayName)", category: .taskbar)

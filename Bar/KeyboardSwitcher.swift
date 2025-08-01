@@ -50,9 +50,6 @@ class KeyboardSwitcher: ObservableObject {
     
     private init() {
         logger.info("KeyboardSwitcher initialized", category: .keyboardSwitching)
-        
-        // Enable keyboard switching logging for testing
-        logger.enableCategory(.keyboardSwitching)
     }
     
     /// Connect to WindowManager for real window data and activation

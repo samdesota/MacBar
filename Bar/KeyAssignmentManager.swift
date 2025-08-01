@@ -30,7 +30,6 @@ class KeyAssignmentManager: ObservableObject {
     private init() {
         logger.info("KeyAssignmentManager initialized", category: .keyboardSwitching)
         loadPersistedAssignments()
-        logger.enableCategory(.keyboardSwitching)
     }
     
     // MARK: - Public API

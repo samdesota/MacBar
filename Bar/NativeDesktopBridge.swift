@@ -10,11 +10,36 @@ import AppKit
 import ApplicationServices
 import Darwin
 
+// Global C callback function for accessibility observers
+private func windowNotificationCallback(
+    observer: AXObserver,
+    element: AXUIElement,
+    notification: CFString,
+    userData: UnsafeMutableRawPointer?
+) {
+    guard let userData = userData else { return }
+    
+    // Extract the bridge instance and PID from userData
+    let callbackData = userData.assumingMemoryBound(to: CallbackData.self).pointee
+    guard let bridge = callbackData.bridge else { return }
+    
+    let notificationName = notification as String
+    bridge.handleWindowNotification(notification: notificationName, element: element, appPID: callbackData.pid)
+}
+
+// Helper struct to pass both bridge and PID to the callback
+private struct CallbackData {
+    weak var bridge: NativeDesktopBridge?
+    let pid: pid_t
+}
+
 /// Protocol for receiving window management events from the native desktop
 protocol NativeDesktopBridgeDelegate: AnyObject {
     func onFocusedWindowChanged(windowID: CGWindowID?)
     func onFrontmostAppChanged(app: NSRunningApplication?)
     func onWindowListChanged()
+    func onAppLaunched(app: NSRunningApplication)
+    func onAppTerminated(app: NSRunningApplication)
 }
 
 /// Abstracts all native macOS window management functionality
@@ -26,6 +51,13 @@ class NativeDesktopBridge: ObservableObject {
     
     private let logger = Logger.shared
     private var frontmostAppObservation: NSKeyValueObservation?
+    private var appLaunchObservation: NSObjectProtocol?
+    private var appTerminateObservation: NSObjectProtocol?
+    
+    // Hammerspoon-style accessibility observers
+    private var globalObserver: AXObserver?
+    private var appObservers: [pid_t: AXObserver] = [:]
+    private var callbackDataStorage: [pid_t: UnsafeMutablePointer<CallbackData>] = [:]
     
     // Focus caching for performance
     private var cachedFocusedWindowID: CGWindowID?
@@ -49,8 +81,16 @@ class NativeDesktopBridge: ObservableObject {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false]
         let hasPermission = AXIsProcessTrustedWithOptions(options as CFDictionary)
         
+        let previousPermission = self.hasAccessibilityPermission
+        
         DispatchQueue.main.async {
             self.hasAccessibilityPermission = hasPermission
+            
+            // If permission was just granted, refresh window observers
+            if !previousPermission && hasPermission {
+                self.logger.info("✅ Accessibility permission granted - refreshing window observers", category: .accessibility)
+                self.refreshWindowObservers()
+            }
         }
         
         logger.info("Accessibility permission: \(hasPermission)", category: .accessibility)
@@ -67,6 +107,7 @@ class NativeDesktopBridge: ObservableObject {
     private func setupEventListeners() {
         logger.info("🔧 Setting up native desktop event listeners", category: .focusSwitching)
         
+        // 1. Frontmost app changes (focus switching)
         frontmostAppObservation = NSWorkspace.shared.observe(
             \.frontmostApplication,
             options: [.new, .old]
@@ -88,8 +129,47 @@ class NativeDesktopBridge: ObservableObject {
                 // Also check for focused window change
                 let focusedWindowID = self.getFocusedWindowID()
                 self.delegate?.onFocusedWindowChanged(windowID: focusedWindowID)
+                self.delegate?.onWindowListChanged()
             }
         }
+        
+        // 2. App launch events (setup window observers)
+        appLaunchObservation = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didLaunchApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self = self,
+                  let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            
+            self.logger.info("🚀 App launched: \(app.localizedName ?? "Unknown")", category: .windowManager)
+            
+            // Set up window observers for this app
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.setupWindowObserver(for: app)
+                self.delegate?.onAppLaunched(app: app)
+                self.delegate?.onWindowListChanged()
+            }
+        }
+        
+        // 3. App termination events (cleanup observers)
+        appTerminateObservation = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self = self,
+                  let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            
+            self.logger.info("🛑 App terminated: \(app.localizedName ?? "Unknown")", category: .windowManager)
+            
+            self.removeWindowObserver(for: app.processIdentifier)
+            self.delegate?.onAppTerminated(app: app)
+            self.delegate?.onWindowListChanged()
+        }
+        
+        // 4. Setup window observers for existing apps
+        setupExistingAppObservers()
         
         logger.info("✅ Native desktop event listeners established", category: .focusSwitching)
     }
@@ -97,7 +177,268 @@ class NativeDesktopBridge: ObservableObject {
     private func teardownEventListeners() {
         frontmostAppObservation?.invalidate()
         frontmostAppObservation = nil
+        
+        if let appLaunchObservation = appLaunchObservation {
+            NSWorkspace.shared.notificationCenter.removeObserver(appLaunchObservation)
+            self.appLaunchObservation = nil
+        }
+        
+        if let appTerminateObservation = appTerminateObservation {
+            NSWorkspace.shared.notificationCenter.removeObserver(appTerminateObservation)
+            self.appTerminateObservation = nil
+        }
+        
+        // Clean up all accessibility observers
+        removeAllWindowObservers()
+        
         logger.debug("Removed native desktop event listeners", category: .focusSwitching)
+    }
+    
+    // MARK: - Hammerspoon-style Window Observers
+    
+    private func setupExistingAppObservers() {
+        // Double-check accessibility permission
+        let hasPermission = checkAccessibilityPermission()
+        guard hasPermission else {
+            logger.warning("⚠️ Cannot set up window observers - no accessibility permission", category: .windowManager)
+            return
+        }
+        
+        logger.info("🔍 Setting up window observers for existing apps", category: .windowManager)
+        
+        let runningApps = NSWorkspace.shared.runningApplications
+        logger.info("📱 Found \(runningApps.count) running applications", category: .windowManager)
+        
+        var observerCount = 0
+        for app in runningApps {
+            if app.activationPolicy == .regular {
+                let appName = app.localizedName ?? "Unknown"
+                logger.debug("🔍 Checking app: \(appName) (PID: \(app.processIdentifier))", category: .windowManager)
+                setupWindowObserver(for: app)
+                observerCount += 1
+            }
+        }
+        
+        logger.info("✅ Attempted to set up observers for \(observerCount) apps, active observers: \(appObservers.count)", category: .windowManager)
+        
+        // Special check for Finder
+        if let finderApp = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == "Finder" }) {
+            if appObservers[finderApp.processIdentifier] != nil {
+                logger.info("✅ Finder observer is active", category: .windowManager)
+            } else {
+                logger.warning("⚠️ Finder observer failed to set up", category: .windowManager)
+            }
+        }
+    }
+    
+    // Public method to refresh observers (useful after permission granted)
+    func refreshWindowObservers() {
+        logger.info("🔄 Refreshing window observers", category: .windowManager)
+        removeAllWindowObservers()
+        setupExistingAppObservers()
+    }
+    
+    // Diagnostic method to check observer status
+    func printObserverStatus() {
+        logger.info("🔍 Observer Status Report:", category: .windowManager)
+        logger.info("  - Accessibility Permission: \(hasAccessibilityPermission)", category: .windowManager)
+        logger.info("  - Active Observers: \(appObservers.count)", category: .windowManager)
+        logger.info("  - Callback Data Storage: \(callbackDataStorage.count)", category: .windowManager)
+        
+        for (pid, _) in appObservers {
+            if let app = NSWorkspace.shared.runningApplications.first(where: { $0.processIdentifier == pid }) {
+                let appName = app.localizedName ?? "Unknown"
+                logger.info("  - Observer for: \(appName) (PID: \(pid))", category: .windowManager)
+            } else {
+                logger.info("  - Observer for: Unknown app (PID: \(pid))", category: .windowManager)
+            }
+        }
+    }
+    
+    private func setupWindowObserver(for app: NSRunningApplication) {
+        guard hasAccessibilityPermission else { 
+            logger.debug("Skipping observer setup - no accessibility permission", category: .windowManager)
+            return 
+        }
+        
+        let pid = app.processIdentifier
+        let appName = app.localizedName ?? "Unknown"
+        
+        // Skip system apps and our own app (but not Finder - we want to track Finder windows)
+        let systemApps = ["Bar", "Dock", "SystemUIServer", "ControlCenter", "NotificationCenter"]
+        if systemApps.contains(appName) {
+            logger.debug("Skipping system app: \(appName)", category: .windowManager)
+            return
+        }
+        
+        // Don't set up duplicate observers
+        if appObservers[pid] != nil {
+            logger.debug("Observer already exists for \(appName) (PID: \(pid))", category: .windowManager)
+            return
+        }
+        
+        logger.info("🎯 Setting up window observer for \(appName) (PID: \(pid))", category: .windowManager)
+        
+        // Allocate callback data
+        let callbackData = UnsafeMutablePointer<CallbackData>.allocate(capacity: 1)
+        callbackData.initialize(to: CallbackData(bridge: self, pid: pid))
+        callbackDataStorage[pid] = callbackData
+        
+        var observer: AXObserver?
+        let result = AXObserverCreate(pid, windowNotificationCallback, &observer)
+        
+        guard result == .success, let validObserver = observer else {
+            let errorMsg = getAXErrorMessage(result)
+            logger.warning("❌ Failed to create accessibility observer for \(appName): \(result.rawValue) (\(errorMsg))", category: .windowManager)
+            // Clean up allocated memory on failure
+            callbackData.deallocate()
+            callbackDataStorage.removeValue(forKey: pid)
+            return
+        }
+        
+        logger.debug("✅ Created AX observer for \(appName)", category: .windowManager)
+        
+        // Add to our observers map
+        appObservers[pid] = validObserver
+        
+        // Set up the observer on the main run loop
+        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(validObserver), .defaultMode)
+        logger.debug("📡 Added observer to run loop for \(appName)", category: .windowManager)
+        
+        // Get the application AX element
+        let axApp = AXUIElementCreateApplication(pid)
+        
+        // Add observers for window events
+        let notifications = [
+            kAXWindowCreatedNotification,
+            kAXUIElementDestroyedNotification,
+            kAXWindowMiniaturizedNotification,
+            kAXWindowDeminiaturizedNotification
+        ]
+        
+        var successCount = 0
+        for notification in notifications {
+            let addResult = AXObserverAddNotification(validObserver, axApp, notification as CFString, callbackData)
+            if addResult == .success {
+                successCount += 1
+                logger.debug("✅ Added \(notification) observer for \(appName)", category: .windowManager)
+            } else {
+                let errorMsg = getAXErrorMessage(addResult)
+                logger.warning("❌ Failed to add \(notification) observer for \(appName): \(addResult.rawValue) (\(errorMsg))", category: .windowManager)
+            }
+        }
+        
+        if successCount > 0 {
+            logger.info("✅ Window observer active for \(appName) (\(successCount)/\(notifications.count) notifications)", category: .windowManager)
+        } else {
+            logger.warning("⚠️ No notifications registered for \(appName) - observer may not work", category: .windowManager)
+        }
+    }
+    
+    private func removeWindowObserver(for pid: pid_t) {
+        guard let observer = appObservers.removeValue(forKey: pid) else { return }
+        
+        CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        
+        // Clean up allocated callback data
+        if let callbackData = callbackDataStorage.removeValue(forKey: pid) {
+            callbackData.deinitialize(count: 1)
+            callbackData.deallocate()
+        }
+        
+        logger.debug("Removed window observer for PID: \(pid)", category: .windowManager)
+    }
+    
+    private func removeAllWindowObservers() {
+        for (pid, observer) in appObservers {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        }
+        appObservers.removeAll()
+        
+        // Clean up all allocated callback data
+        for (_, callbackData) in callbackDataStorage {
+            callbackData.deinitialize(count: 1)
+            callbackData.deallocate()
+        }
+        callbackDataStorage.removeAll()
+        
+        logger.debug("Removed all window observers", category: .windowManager)
+    }
+    
+    func handleWindowNotification(notification: String, element: AXUIElement, appPID: pid_t) {
+        logger.info("🔔 Window notification: \(notification) from PID: \(appPID)", category: .windowManager)
+        
+        switch notification {
+        case kAXWindowCreatedNotification as String:
+            logger.info("🆕 Window created", category: .windowManager)
+            // Add delay to allow Core Graphics window list to update
+            self.scheduleWindowListUpdate(reason: "window creation", initialDelay: 0.1)
+            
+        case kAXUIElementDestroyedNotification as String:
+            logger.info("🗑️ Window destroyed", category: .windowManager)
+            // Add delay to allow Core Graphics window list to update
+            self.scheduleWindowListUpdate(reason: "window destruction", initialDelay: 0.1)
+            
+        case kAXWindowMiniaturizedNotification as String:
+            logger.info("📦 Window minimized", category: .windowManager)
+            // Smaller delay for minimize/restore as these are state changes, not list changes
+            self.scheduleWindowListUpdate(reason: "window minimize", initialDelay: 0.05)
+            
+        case kAXWindowDeminiaturizedNotification as String:
+            logger.info("📤 Window restored", category: .windowManager)
+            // Smaller delay for minimize/restore as these are state changes, not list changes
+            self.scheduleWindowListUpdate(reason: "window restore", initialDelay: 0.05)
+            
+        default:
+            logger.debug("Unknown window notification: \(notification)", category: .windowManager)
+        }
+    }
+    
+    // MARK: - Window List Update Scheduling
+    
+    private var pendingUpdates: Set<String> = []
+    private let updateQueue = DispatchQueue(label: "window-update-queue", qos: .userInteractive)
+    
+    private func scheduleWindowListUpdate(reason: String, initialDelay: TimeInterval) {
+        updateQueue.async {
+            // Prevent duplicate updates for the same reason
+            guard !self.pendingUpdates.contains(reason) else {
+                self.logger.debug("⏭️ Skipping duplicate update for \(reason)", category: .windowManager)
+                return
+            }
+            
+            self.pendingUpdates.insert(reason)
+            
+            DispatchQueue.main.asyncAfter(deadline: .now() + initialDelay) {
+                self.logger.debug("🔄 Updating window list after \(reason) delay (\(Int(initialDelay * 1000))ms)", category: .windowManager)
+                
+                // Store window count before update
+                let windowsBefore = self.getAllWindows(includeOffscreen: false).count
+                
+                self.delegate?.onWindowListChanged()
+                
+                // Check if we should retry (for window creation events)
+                if reason.contains("creation") {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        let windowsAfter = self.getAllWindows(includeOffscreen: false).count
+                        self.logger.debug("📊 Window count: before=\(windowsBefore), after=\(windowsAfter)", category: .windowManager)
+                        
+                        // If no change detected and this was a creation event, try one more time
+                        if windowsAfter <= windowsBefore {
+                            self.logger.debug("🔄 Retrying window list update - no new windows detected", category: .windowManager)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                                self.delegate?.onWindowListChanged()
+                            }
+                        }
+                    }
+                }
+                
+                // Remove from pending updates
+                self.updateQueue.async {
+                    self.pendingUpdates.remove(reason)
+                }
+            }
+        }
     }
     
     // MARK: - Window Discovery
