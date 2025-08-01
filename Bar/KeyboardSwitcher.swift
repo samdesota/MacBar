@@ -373,8 +373,10 @@ class KeyboardSwitcher: ObservableObject {
     
     /// Create CGEvent tap to capture input system-wide
     private func createEventTap() {
-        // Create the event tap
-        let eventMask = (1 << CGEventType.keyDown.rawValue)
+        // Create the event tap - capture all keyboard events to prevent them from reaching other apps during switching mode
+        let eventMask = (1 << CGEventType.keyDown.rawValue) |
+                       (1 << CGEventType.keyUp.rawValue) |
+                       (1 << CGEventType.flagsChanged.rawValue)
         
         eventTap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
@@ -421,8 +423,9 @@ class KeyboardSwitcher: ObservableObject {
             return Unmanaged.passUnretained(event) // Pass through
         }
         
-        // Handle key down events
-        if type == .keyDown {
+        // During switching mode, consume ALL keyboard events to prevent other apps from receiving them
+        switch type {
+        case .keyDown:
             let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
             let flags = event.flags
             
@@ -444,12 +447,22 @@ class KeyboardSwitcher: ObservableObject {
                 handleSwitchingModeKeystroke(nsEvent)
             }
             
-            // Consume the event (return nil) to prevent it from reaching other applications
-            return nil
+        case .keyUp:
+            // Log keyUp events but don't process them for switching logic
+            let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+            logger.debug("Consuming keyUp event during switching mode: keyCode \(keyCode)", category: .keyboardSwitching)
+            
+        case .flagsChanged:
+            // Log modifier changes but don't process them for switching logic
+            let flags = event.flags
+            logger.debug("Consuming flagsChanged event during switching mode: flags \(flags)", category: .keyboardSwitching)
+            
+        default:
+            logger.debug("Consuming other keyboard event during switching mode: type \(type)", category: .keyboardSwitching)
         }
         
-        // For other event types, pass them through
-        return Unmanaged.passUnretained(event)
+        // Consume ALL keyboard events (return nil) to prevent them from reaching other applications
+        return nil
     }
     
     /// Start monitoring keystrokes during switching mode

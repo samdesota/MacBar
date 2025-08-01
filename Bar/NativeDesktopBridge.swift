@@ -666,12 +666,19 @@ class NativeDesktopBridge: ObservableObject {
             return .permissionDenied
         }
         
+        // Try AppleScript first - more robust for stubborn apps like Xcode
+        if activateWindowWithAppleScript(windowID: windowID) {
+            return .success
+        }
+        
+        // Fallback to standard NSWorkspace + AX approach
         guard let axWindow = getAXWindowElement(for: windowID) else {
             return .windowNotFound
         }
         
         // First activate the application
         if let app = getAppForWindow(windowID: windowID) {
+            logger.info("Activating app: \(app.localizedName)", category: .focusSwitching)
             app.activate(options: .activateIgnoringOtherApps)
         }
         
@@ -683,6 +690,48 @@ class NativeDesktopBridge: ObservableObject {
         } else {
             return .failed(getAXErrorMessage(result))
         }
+    }
+    
+    private func activateWindowWithAppleScript(windowID: CGWindowID) -> Bool {
+        logger.debug("🔧 Trying AppleScript activation for window ID: \(windowID)", category: .focusSwitching)
+        
+        guard let app = getAppForWindow(windowID: windowID),
+              let appName = app.localizedName else {
+            return false
+        }
+        
+        // Get window title if available
+        let windowTitle = getWindowTitle(windowID: windowID)
+        
+        let script: String
+        if let title = windowTitle, !title.isEmpty {
+            // Try to activate specific window by title
+            script = """
+            tell application "\(appName)"
+                activate
+                try
+                    set frontmost to true
+                    tell window "\(title)" to set index to 1
+                end try
+            end tell
+            """
+        } else {
+            // Just activate the app if no window title
+            script = "tell application \"\(appName)\" to activate"
+        }
+        
+        var error: NSDictionary?
+        if let scriptObject = NSAppleScript(source: script) {
+            let result = scriptObject.executeAndReturnError(&error)
+            let success = (error == nil)
+            logger.debug("🔧 AppleScript result: \(success ? "SUCCESS" : "FAILED")", category: .focusSwitching)
+            if let error = error {
+                logger.debug("🔧 AppleScript error: \(error)", category: .focusSwitching)
+            }
+            return success
+        }
+        
+        return false
     }
     
     func minimizeWindow(windowID: CGWindowID) -> WindowMoveResult {

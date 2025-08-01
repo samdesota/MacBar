@@ -77,21 +77,6 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
         printObserverStatus()
     }
     
-    func testFinderDetection() {
-        logger.info("🗂️ Testing Finder window detection", category: .windowManager)
-        refreshWindowObservers() // This will now include Finder
-        printObserverStatus()
-        
-        // Check if Finder windows are being detected
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            let finderWindows = self.openWindows.filter { $0.owner == "Finder" }
-            self.logger.info("📁 Found \(finderWindows.count) Finder windows", category: .windowManager)
-            for window in finderWindows {
-                self.logger.info("  - \(window.displayName) (ID: \(window.id))", category: .windowManager)
-            }
-        }
-    }
-    
     func startMonitoring() {
         logger.info("Starting window monitoring", category: .windowManager)
         // Update immediately
@@ -404,41 +389,41 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
     }
     
     func activateWindow(_ windowInfo: WindowInfo) {
-        logger.info("Attempting to activate window: \(windowInfo.displayName) (\(windowInfo.owner))", category: .taskbar)
+        logger.info("Attempting to activate window: \(windowInfo.displayName) (\(windowInfo.owner))", category: .focusSwitching)
         
         let result = nativeBridge.activateWindow(windowID: windowInfo.id)
         
         switch result {
         case .success:
-            logger.info("Successfully activated window: \(windowInfo.displayName)", category: .taskbar)
+            logger.info("Successfully activated window: \(windowInfo.displayName)", category: .focusSwitching)
         case .failed(let error):
-            logger.warning("Failed to activate window: \(windowInfo.displayName), error: \(error)", category: .taskbar)
+            logger.warning("Failed to activate window: \(windowInfo.displayName), error: \(error)", category: .focusSwitching)
             // Fall back to activating the app
             if let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == windowInfo.owner }) {
                 app.activate(options: .activateIgnoringOtherApps)
-                logger.info("Successfully activated app as fallback: \(app.localizedName)", category: .taskbar)
+                logger.info("Successfully activated app as fallback: \(app.localizedName)", category: .focusSwitching)
             }
         case .permissionDenied:
-            logger.warning("Permission denied for activating window: \(windowInfo.displayName)", category: .taskbar)
+            logger.warning("Permission denied for activating window: \(windowInfo.displayName)", category: .focusSwitching)
         case .windowNotFound:
-            logger.error("Window not found: \(windowInfo.displayName)", category: .taskbar)
+            logger.error("Window not found: \(windowInfo.displayName)", category: .focusSwitching)
         }
     }
     
     func minimizeWindow(_ windowInfo: WindowInfo) {
-        logger.info("Attempting to minimize window: \(windowInfo.displayName)", category: .taskbar)
+        logger.info("Attempting to minimize window: \(windowInfo.displayName)", category: .focusSwitching)
         
         let result = nativeBridge.minimizeWindow(windowID: windowInfo.id)
         
         switch result {
         case .success:
-            logger.info("Successfully minimized window: \(windowInfo.displayName)", category: .taskbar)
+            logger.info("Successfully minimized window: \(windowInfo.displayName)", category: .focusSwitching)
         case .failed(let error):
-            logger.warning("Failed to minimize window: \(windowInfo.displayName), error: \(error)", category: .taskbar)
+            logger.warning("Failed to minimize window: \(windowInfo.displayName), error: \(error)", category: .focusSwitching)
         case .permissionDenied:
-            logger.warning("Permission denied for minimizing window: \(windowInfo.displayName)", category: .taskbar)
+            logger.warning("Permission denied for minimizing window: \(windowInfo.displayName)", category: .focusSwitching)
         case .windowNotFound:
-            logger.error("Window not found: \(windowInfo.displayName)", category: .taskbar)
+            logger.error("Window not found: \(windowInfo.displayName)", category: .focusSwitching)
         }
     }
 }

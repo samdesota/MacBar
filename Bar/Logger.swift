@@ -15,6 +15,7 @@ class Logger: ObservableObject {
         case windowManager = "WindowManager"
         case windowPositioning = "WindowPositioning"
         case accessibility = "Accessibility"
+        case temporary = "Temporary"
         case taskbar = "Taskbar"
         case general = "General"
         case debug = "Debug"
@@ -28,7 +29,7 @@ class Logger: ObservableObject {
     
     private init() {
         // Enable accessibility and window positioning logging by default for debugging
-        enabledCategories = [.windowManager]
+        enabledCategories = [.keyboardSwitching, .focusSwitching]
     }
     
     func enableCategory(_ category: LogCategory) {
