@@ -6,17 +6,24 @@
 //
 
 import SwiftUI
+import AppKit
 
 struct ContentView: View {
-    @StateObject private var windowManager = WindowManager()
+    @EnvironmentObject var windowManager: WindowManager
+    @StateObject private var keyboardSwitcher = KeyboardSwitcher.shared
     
     var body: some View {
-        TaskbarView(windowManager: windowManager)
+        TaskbarView(windowManager: windowManager, keyboardSwitcher: keyboardSwitcher)
+            .onAppear {
+                // Connect KeyboardSwitcher to WindowManager
+                keyboardSwitcher.connectWindowManager(windowManager)
+            }
     }
 }
 
 struct TaskbarView: View {
     @ObservedObject var windowManager: WindowManager
+    @ObservedObject var keyboardSwitcher: KeyboardSwitcher
     @StateObject private var logger = Logger.shared
     @State private var showLogControls = false
     @State private var showSettings = false
@@ -27,9 +34,13 @@ struct TaskbarView: View {
             HStack(spacing: 2) {
                 // Window list
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 2) {
-                        ForEach(windowManager.openWindows) { window in
-                            WindowButton(window: window, windowManager: windowManager)
+                    HStack(spacing: 8) {
+                        ForEach(windowManager.openWindows, id: \.id) { window in
+                            WindowButton(
+                                windowID: window.id,
+                                windowManager: windowManager,
+                                keyboardSwitcher: keyboardSwitcher
+                            )
                         }
                     }
                     .padding(.horizontal, 4)
@@ -146,26 +157,50 @@ struct TaskbarView: View {
 }
 
 struct WindowButton: View {
-    let window: WindowInfo
+    let windowID: CGWindowID
     @ObservedObject var windowManager: WindowManager
+    @ObservedObject var keyboardSwitcher: KeyboardSwitcher
     @State private var isHovered = false
     @StateObject private var logger = Logger.shared
     
+    // Get the current window from windowManager (reactive to changes)
+    private var window: WindowInfo? {
+        windowManager.openWindows.first { $0.id == windowID }
+    }
+    
     var body: some View {
-        Button(action: {
-            logger.info("Clicked window button for: \(window.displayName)", category: .taskbar)
-            windowManager.activateWindow(window)
-        }) {
-            HStack(spacing: 6) {
-                // App icon
-                if let icon = window.icon {
+        guard let window = window else {
+            return AnyView(EmptyView())
+        }
+        
+        return AnyView(
+            Button(action: {
+                logger.info("Clicked window button for: \(window.displayName)", category: .taskbar)
+                windowManager.activateWindow(window)
+            }) {
+            HStack(spacing: 4) {
+                // App icon or assigned key letter
+                if keyboardSwitcher.isSwitchingMode, let assignedKey = getAssignedKey() {
+                    // Show assigned key letter when in switching mode
+                    let backgroundColor = window.icon != nil ? extractAverageColor(from: window.icon!) : Color.accentColor
+                    let textColor = contrastingTextColor(for: backgroundColor)
+                    
+                    Text(assignedKey.uppercased())
+                        .font(.system(size: 14, weight: .bold, design: .monospaced))
+                        .foregroundColor(textColor)
+                        .frame(width: 20, height: 20)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5)
+                                .fill(backgroundColor)
+                        )
+                } else if let icon = window.icon {
                     Image(nsImage: icon)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
-                        .frame(width: 16, height: 16)
+                        .frame(width: 20, height: 20)
                 } else {
                     Image(systemName: "app")
-                        .font(.system(size: 14))
+                        .font(.system(size: 16))
                         .foregroundColor(.secondary)
                 }
                 
@@ -176,18 +211,19 @@ struct WindowButton: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
-            .padding(.horizontal, 8)
+            .padding(.horizontal, 6)
             .padding(.vertical, 4)
             .frame(maxWidth: 200)
             .background(
                 RoundedRectangle(cornerRadius: 4)
-                    .fill(backgroundColor)
+                    .fill(backgroundColor(for: window))
             )
             .overlay(
+                // Active window focus ring
                 RoundedRectangle(cornerRadius: 4)
                     .stroke(window.isActive ? Color.accentColor : Color.clear, lineWidth: 1)
             )
-        }
+        } // Closes Button content
         .buttonStyle(PlainButtonStyle())
         .onHover { hovering in
             isHovered = hovering
@@ -201,11 +237,76 @@ struct WindowButton: View {
                 print("Close \(window.displayName)")
             }
         }
+        ) // Closes AnyView
     }
     
-    private var backgroundColor: Color {
+    /// Get the assigned key for this window from KeyboardSwitcher
+    private func getAssignedKey() -> String? {
+        let keyAssignments = keyboardSwitcher.getKeyAssignments()
+        return keyAssignments[windowID]
+    }
+    
+    /// Extract average color from an NSImage
+    private func extractAverageColor(from image: NSImage) -> Color {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            return Color.accentColor
+        }
+        
+        // Create a small bitmap context to sample colors
+        let width = 1
+        let height = 1
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+        
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 4,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo.rawValue
+        ) else {
+            return Color.accentColor
+        }
+        
+        // Draw the image scaled to 1x1 to get average color
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        
+        guard let data = context.data else {
+            return Color.accentColor
+        }
+        
+        let pixelData = data.assumingMemoryBound(to: UInt8.self)
+        let red = CGFloat(pixelData[0]) / 255.0
+        let green = CGFloat(pixelData[1]) / 255.0
+        let blue = CGFloat(pixelData[2]) / 255.0
+        
+        return Color(red: red, green: green, blue: blue)
+    }
+    
+    /// Calculate contrasting text color based on background brightness
+    private func contrastingTextColor(for backgroundColor: Color) -> Color {
+        // Convert SwiftUI Color to UIColor to access RGB components
+        let uiColor = NSColor(backgroundColor)
+        
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        var alpha: CGFloat = 0
+        
+        uiColor.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+        
+        // Calculate luminance using standard formula
+        let luminance = 0.299 * red + 0.587 * green + 0.114 * blue
+        
+        // Return white text for dark backgrounds, black text for light backgrounds
+        return luminance > 0.5 ? Color.black : Color.white
+    }
+    
+    private func backgroundColor(for window: WindowInfo) -> Color {
         if window.isActive {
-            return Color.accentColor.opacity(0.2)
+            return Color.accentColor.opacity(0.3)
         } else if isHovered {
             return Color.primary.opacity(0.1)
         } else {
@@ -234,6 +335,7 @@ struct SettingsView: View {
 
 #Preview {
     ContentView()
+        .environmentObject(WindowManager())
         .frame(width: 1200, height: 42)
         .background(Color.black.opacity(0.1))
 }

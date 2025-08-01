@@ -19,6 +19,7 @@ class Logger: ObservableObject {
         case general = "General"
         case debug = "Debug"
         case keyboardSwitching = "KeyboardSwitching"
+        case focusSwitching = "FocusSwitching"
     }
     
     @Published var enabledCategories: Set<LogCategory> = []
@@ -27,7 +28,7 @@ class Logger: ObservableObject {
     
     private init() {
         // Enable accessibility and window positioning logging by default for debugging
-        enabledCategories = [.taskbar]
+        enabledCategories = [.focusSwitching]
     }
     
     func enableCategory(_ category: LogCategory) {
@@ -56,7 +57,7 @@ class Logger: ObservableObject {
         let timestamp = DateFormatter.logFormatter.string(from: Date())
         let logMessage = "[\(timestamp)] [\(category.rawValue)] \(message)"
         
-        os_log("%{public}@", log: osLog, type: level, logMessage)
+        // Use print for cleaner console output (os_log causes duplicates in Xcode console)
         print(logMessage)
     }
     

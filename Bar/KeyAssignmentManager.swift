@@ -39,21 +39,44 @@ class KeyAssignmentManager: ObservableObject {
     func assignKeys(to windows: [WindowInfo]) {
         logger.info("Starting key assignment for \(windows.count) windows", category: .keyboardSwitching)
         
-        // Clear current assignments for fresh calculation
-        keyAssignments.removeAll()
-        assignedKeys.removeAll()
+        // Clean up assignments for windows that no longer exist
+        let currentWindowIDs = Set(windows.map { $0.id })
+        let previousAssignmentCount = keyAssignments.count
+        keyAssignments = keyAssignments.filter { currentWindowIDs.contains($0.key) }
         
-        // Sort windows by preference (active first, then alphabetically by display name)
-        let sortedWindows = sortWindowsByPriority(windows)
+        // Update assignedKeys to match current assignments
+        assignedKeys = Set(keyAssignments.values)
         
-        for window in sortedWindows {
+        let cleanedCount = previousAssignmentCount - keyAssignments.count
+        if cleanedCount > 0 {
+            logger.info("Cleaned up \(cleanedCount) assignments for closed windows", category: .keyboardSwitching)
+        }
+        
+        // Only assign keys to windows that don't already have assignments
+        let windowsNeedingAssignment = windows.filter { keyAssignments[$0.id] == nil }
+        logger.info("\(keyAssignments.count) windows have existing assignments, \(windowsNeedingAssignment.count) need new assignments", category: .keyboardSwitching)
+        
+        // Sort new windows by preference (active first, then alphabetically by display name)
+        let sortedNewWindows = sortWindowsByPriority(windowsNeedingAssignment)
+        
+        for window in sortedNewWindows {
             if let assignedKey = assignKey(for: window) {
                 keyAssignments[window.id] = assignedKey
                 assignedKeys.insert(assignedKey)
                 
-                logger.debug("Assigned key '\(assignedKey)' to window '\(window.displayName)' (\(window.owner))", category: .keyboardSwitching)
+                logger.debug("Assigned key '\(assignedKey)' to new window '\(window.displayName)' (\(window.owner))", category: .keyboardSwitching)
             } else {
                 logger.warning("Failed to assign key to window '\(window.displayName)' (\(window.owner)) - no available keys", category: .keyboardSwitching)
+            }
+        }
+        
+        // Log preserved assignments for debugging
+        let preservedWindows = windows.filter { window in
+            keyAssignments[window.id] != nil && !windowsNeedingAssignment.contains(where: { $0.id == window.id })
+        }
+        for window in preservedWindows {
+            if let key = keyAssignments[window.id] {
+                logger.debug("Preserved key '\(key)' for existing window '\(window.displayName)' (\(window.owner))", category: .keyboardSwitching)
             }
         }
         
@@ -259,7 +282,7 @@ extension KeyAssignmentManager {
             createMockWindowInfo(name: "Photoshop 2024", owner: "Adobe Photoshop 2024"),
             createMockWindowInfo(name: "Excel", owner: "Microsoft Excel"),
             
-            // More apps to test fllback to numbers
+            // More apps to test sfllback to numbers
             createMockWindowInfo(name: "Finder", owner: "Finder"),
             createMockWindowInfo(name: "Mail", owner: "Mail"),
             createMockWindowInfo(name: "Calendar", owner: "Calendar"),
