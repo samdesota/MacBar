@@ -11,9 +11,21 @@ import AppKit
 struct ContentView: View {
     @EnvironmentObject var windowManager: WindowManager
     @StateObject private var keyboardSwitcher = KeyboardSwitcher.shared
+    let spaceID: String // Add space ID parameter
+    
+    init(spaceID: String = "unknown") {
+        self.spaceID = spaceID
+    }
+    
+    // Helper function to convert space ID string to UInt64
+    private func spaceIDToUInt64(_ spaceIDString: String) -> UInt64 {
+        // Remove "space-" prefix and convert to UInt64
+        let numericPart = spaceIDString.replacingOccurrences(of: "space-", with: "")
+        return UInt64(numericPart) ?? 0
+    }
     
     var body: some View {
-        TaskbarView(windowManager: windowManager, keyboardSwitcher: keyboardSwitcher)
+        TaskbarView(windowManager: windowManager, keyboardSwitcher: keyboardSwitcher, spaceID: spaceID)
             .onAppear {
                 // Connect KeyboardSwitcher to WindowManager
                 keyboardSwitcher.connectWindowManager(windowManager)
@@ -27,6 +39,19 @@ struct TaskbarView: View {
     @StateObject private var logger = Logger.shared
     @State private var showLogControls = false
     @State private var showSettings = false
+    let spaceID: String // Add space ID parameter
+    
+    // Get the current space ID for debug display
+    private var currentSpaceID: String {
+        spaceID // Use the passed space ID instead of the shared one
+    }
+    
+    // Helper function to convert space ID string to UInt64
+    private func spaceIDToUInt64(_ spaceIDString: String) -> UInt64 {
+        // Remove "space-" prefix and convert to UInt64
+        let numericPart = spaceIDString.replacingOccurrences(of: "space-", with: "")
+        return UInt64(numericPart) ?? 0
+    }
     
     var body: some View {
         ZStack {
@@ -35,11 +60,12 @@ struct TaskbarView: View {
                 // Window list
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
-                        ForEach(windowManager.openWindows, id: \.id) { window in
+                        ForEach(windowManager.getWindowsForSpace(self.spaceIDToUInt64(spaceID)), id: \.id) { window in
                             WindowButton(
                                 windowID: window.id,
                                 windowManager: windowManager,
-                                keyboardSwitcher: keyboardSwitcher
+                                keyboardSwitcher: keyboardSwitcher,
+                                spaceID: spaceID
                             )
                         }
                     }
@@ -92,6 +118,30 @@ struct TaskbarView: View {
             
             // Debug overlay
             VStack {
+                // Debug info showing space ID and window count
+                HStack {
+                    Text("Taskbar: \(currentSpaceID)")
+                        .font(.caption2)
+                        .fontWeight(.bold)
+                        .foregroundColor(.blue)
+                    
+                    Text("Windows: \(windowManager.getWindowsForSpace(spaceIDToUInt64(spaceID)).count)/\(windowManager.spaceWindows.values.flatMap { $0 }.count)")
+                        .font(.caption2)
+                        .foregroundColor(.green)
+                    
+                    // Show window IDs for debugging
+                    Text("App IDs: \(windowManager.getWindowsForSpace(spaceIDToUInt64(spaceID)).prefix(3).map { String($0.id) }.joined(separator: ", "))")
+                        .font(.caption2)
+                        .foregroundColor(.purple)
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 2)
+                .background(Color.black.opacity(0.1))
+                .cornerRadius(4)
+                
+                Spacer()
+                
                 if !windowManager.hasAccessibilityPermission {
                     HStack {
                         Image(systemName: "exclamationmark.triangle.fill")
@@ -160,12 +210,26 @@ struct WindowButton: View {
     let windowID: CGWindowID
     @ObservedObject var windowManager: WindowManager
     @ObservedObject var keyboardSwitcher: KeyboardSwitcher
+    let spaceID: String
     @State private var isHovered = false
     @StateObject private var logger = Logger.shared
     
     // Get the current window from windowManager (reactive to changes)
     private var window: WindowInfo? {
-        windowManager.openWindows.first { $0.id == windowID }
+        // Look through all spaces to find the window
+        for spaceWindows in windowManager.spaceWindows.values {
+            if let window = spaceWindows.first(where: { $0.id == windowID }) {
+                return window
+            }
+        }
+        return nil
+    }
+    
+    // Helper function to convert space ID string to UInt64
+    private func spaceIDToUInt64(_ spaceIDString: String) -> UInt64 {
+        // Remove "space-" prefix and convert to UInt64
+        let numericPart = spaceIDString.replacingOccurrences(of: "space-", with: "")
+        return UInt64(numericPart) ?? 0
     }
     
     var body: some View {

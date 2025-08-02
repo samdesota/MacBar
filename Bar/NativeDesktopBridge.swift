@@ -66,7 +66,7 @@ class NativeDesktopBridge: ObservableObject {
     private let focusCacheTimeout: TimeInterval = 0.1 // 100ms
     
     init() {
-        logger.info("🌉 NativeDesktopBridge initialized", category: .general)
+        logger.info("🌉 NativeDesktopBridge initialized", category: .nativeBridge)
         _ = checkAccessibilityPermission()
         setupEventListeners()
     }
@@ -88,12 +88,12 @@ class NativeDesktopBridge: ObservableObject {
             
             // If permission was just granted, refresh window observers
             if !previousPermission && hasPermission {
-                self.logger.info("✅ Accessibility permission granted - refreshing window observers", category: .accessibility)
+                self.logger.info("✅ Accessibility permission granted - refreshing window observers", category: .nativeBridge)
                 self.refreshWindowObservers()
             }
         }
         
-        logger.info("Accessibility permission: \(hasPermission)", category: .accessibility)
+        logger.info("Accessibility permission: \(hasPermission)", category: .nativeBridge)
         return hasPermission
     }
     
@@ -105,7 +105,7 @@ class NativeDesktopBridge: ObservableObject {
     // MARK: - Event Listeners
     
     private func setupEventListeners() {
-        logger.info("🔧 Setting up native desktop event listeners", category: .focusSwitching)
+        logger.info("🔧 Setting up native desktop event listeners", category: .nativeBridge)
         
         // 1. Frontmost app changes (focus switching)
         frontmostAppObservation = NSWorkspace.shared.observe(
@@ -117,7 +117,7 @@ class NativeDesktopBridge: ObservableObject {
             let oldApp = change.oldValue??.localizedName ?? "None"
             let newApp = change.newValue??.localizedName ?? "None"
             
-            self.logger.info("🚨 Frontmost app changed: \(oldApp) → \(newApp)", category: .focusSwitching)
+            self.logger.info("🚨 Frontmost app changed: \(oldApp) → \(newApp)", category: .nativeBridge)
             
             // Clear focus cache since app changed
             self.clearFocusCache()
@@ -142,7 +142,7 @@ class NativeDesktopBridge: ObservableObject {
             guard let self = self,
                   let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             
-            self.logger.info("🚀 App launched: \(app.localizedName ?? "Unknown")", category: .windowManager)
+            self.logger.info("🚀 App launched: \(app.localizedName ?? "Unknown")", category: .nativeBridge)
             
             // Set up window observers for this app
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -161,7 +161,7 @@ class NativeDesktopBridge: ObservableObject {
             guard let self = self,
                   let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             
-            self.logger.info("🛑 App terminated: \(app.localizedName ?? "Unknown")", category: .windowManager)
+            self.logger.info("🛑 App terminated: \(app.localizedName ?? "Unknown")", category: .nativeBridge)
             
             self.removeWindowObserver(for: app.processIdentifier)
             self.delegate?.onAppTerminated(app: app)
@@ -171,7 +171,7 @@ class NativeDesktopBridge: ObservableObject {
         // 4. Setup window observers for existing apps
         setupExistingAppObservers()
         
-        logger.info("✅ Native desktop event listeners established", category: .focusSwitching)
+        logger.info("✅ Native desktop event listeners established", category: .nativeBridge)
     }
     
     private func teardownEventListeners() {
@@ -191,7 +191,7 @@ class NativeDesktopBridge: ObservableObject {
         // Clean up all accessibility observers
         removeAllWindowObservers()
         
-        logger.debug("Removed native desktop event listeners", category: .focusSwitching)
+        logger.debug("Removed native desktop event listeners", category: .nativeBridge)
     }
     
     // MARK: - Hammerspoon-style Window Observers
@@ -200,64 +200,64 @@ class NativeDesktopBridge: ObservableObject {
         // Double-check accessibility permission
         let hasPermission = checkAccessibilityPermission()
         guard hasPermission else {
-            logger.warning("⚠️ Cannot set up window observers - no accessibility permission", category: .windowManager)
+            logger.warning("⚠️ Cannot set up window observers - no accessibility permission", category: .nativeBridge)
             return
         }
         
-        logger.info("🔍 Setting up window observers for existing apps", category: .windowManager)
+        logger.info("🔍 Setting up window observers for existing apps", category: .nativeBridge)
         
         let runningApps = NSWorkspace.shared.runningApplications
-        logger.info("📱 Found \(runningApps.count) running applications", category: .windowManager)
+        logger.info("📱 Found \(runningApps.count) running applications", category: .nativeBridge)
         
         var observerCount = 0
         for app in runningApps {
             if app.activationPolicy == .regular {
                 let appName = app.localizedName ?? "Unknown"
-                logger.debug("🔍 Checking app: \(appName) (PID: \(app.processIdentifier))", category: .windowManager)
+                logger.debug("🔍 Checking app: \(appName) (PID: \(app.processIdentifier))", category: .nativeBridge)
                 setupWindowObserver(for: app)
                 observerCount += 1
             }
         }
         
-        logger.info("✅ Attempted to set up observers for \(observerCount) apps, active observers: \(appObservers.count)", category: .windowManager)
+        logger.info("✅ Attempted to set up observers for \(observerCount) apps, active observers: \(appObservers.count)", category: .nativeBridge)
         
         // Special check for Finder
         if let finderApp = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == "Finder" }) {
             if appObservers[finderApp.processIdentifier] != nil {
-                logger.info("✅ Finder observer is active", category: .windowManager)
+                logger.info("✅ Finder observer is active", category: .nativeBridge)
             } else {
-                logger.warning("⚠️ Finder observer failed to set up", category: .windowManager)
+                logger.warning("⚠️ Finder observer failed to set up", category: .nativeBridge)
             }
         }
     }
     
     // Public method to refresh observers (useful after permission granted)
     func refreshWindowObservers() {
-        logger.info("🔄 Refreshing window observers", category: .windowManager)
+        logger.info("🔄 Refreshing window observers", category: .nativeBridge)
         removeAllWindowObservers()
         setupExistingAppObservers()
     }
     
     // Diagnostic method to check observer status
     func printObserverStatus() {
-        logger.info("🔍 Observer Status Report:", category: .windowManager)
-        logger.info("  - Accessibility Permission: \(hasAccessibilityPermission)", category: .windowManager)
-        logger.info("  - Active Observers: \(appObservers.count)", category: .windowManager)
-        logger.info("  - Callback Data Storage: \(callbackDataStorage.count)", category: .windowManager)
+        logger.info("🔍 Observer Status Report:", category: .nativeBridge)
+        logger.info("  - Accessibility Permission: \(hasAccessibilityPermission)", category: .nativeBridge)
+        logger.info("  - Active Observers: \(appObservers.count)", category: .nativeBridge)
+        logger.info("  - Callback Data Storage: \(callbackDataStorage.count)", category: .nativeBridge)
         
         for (pid, _) in appObservers {
             if let app = NSWorkspace.shared.runningApplications.first(where: { $0.processIdentifier == pid }) {
                 let appName = app.localizedName ?? "Unknown"
-                logger.info("  - Observer for: \(appName) (PID: \(pid))", category: .windowManager)
+                logger.info("  - Observer for: \(appName) (PID: \(pid))", category: .nativeBridge)
             } else {
-                logger.info("  - Observer for: Unknown app (PID: \(pid))", category: .windowManager)
+                logger.info("  - Observer for: Unknown app (PID: \(pid))", category: .nativeBridge)
             }
         }
     }
     
     private func setupWindowObserver(for app: NSRunningApplication) {
         guard hasAccessibilityPermission else { 
-            logger.debug("Skipping observer setup - no accessibility permission", category: .windowManager)
+            logger.debug("Skipping observer setup - no accessibility permission", category: .nativeBridge)
             return 
         }
         
@@ -267,17 +267,17 @@ class NativeDesktopBridge: ObservableObject {
         // Skip system apps and our own app (but not Finder - we want to track Finder windows)
         let systemApps = ["Bar", "Dock", "SystemUIServer", "ControlCenter", "NotificationCenter"]
         if systemApps.contains(appName) {
-            logger.debug("Skipping system app: \(appName)", category: .windowManager)
+            logger.debug("Skipping system app: \(appName)", category: .nativeBridge)
             return
         }
         
         // Don't set up duplicate observers
         if appObservers[pid] != nil {
-            logger.debug("Observer already exists for \(appName) (PID: \(pid))", category: .windowManager)
+            logger.debug("Observer already exists for \(appName) (PID: \(pid))", category: .nativeBridge)
             return
         }
         
-        logger.info("🎯 Setting up window observer for \(appName) (PID: \(pid))", category: .windowManager)
+        logger.info("🎯 Setting up window observer for \(appName) (PID: \(pid))", category: .nativeBridge)
         
         // Allocate callback data
         let callbackData = UnsafeMutablePointer<CallbackData>.allocate(capacity: 1)
@@ -289,21 +289,21 @@ class NativeDesktopBridge: ObservableObject {
         
         guard result == .success, let validObserver = observer else {
             let errorMsg = getAXErrorMessage(result)
-            logger.warning("❌ Failed to create accessibility observer for \(appName): \(result.rawValue) (\(errorMsg))", category: .windowManager)
+            logger.warning("❌ Failed to create accessibility observer for \(appName): \(result.rawValue) (\(errorMsg))", category: .nativeBridge)
             // Clean up allocated memory on failure
             callbackData.deallocate()
             callbackDataStorage.removeValue(forKey: pid)
             return
         }
         
-        logger.debug("✅ Created AX observer for \(appName)", category: .windowManager)
+        logger.debug("✅ Created AX observer for \(appName)", category: .nativeBridge)
         
         // Add to our observers map
         appObservers[pid] = validObserver
         
         // Set up the observer on the main run loop
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(validObserver), .defaultMode)
-        logger.debug("📡 Added observer to run loop for \(appName)", category: .windowManager)
+        logger.debug("📡 Added observer to run loop for \(appName)", category: .nativeBridge)
         
         // Get the application AX element
         let axApp = AXUIElementCreateApplication(pid)
@@ -321,17 +321,17 @@ class NativeDesktopBridge: ObservableObject {
             let addResult = AXObserverAddNotification(validObserver, axApp, notification as CFString, callbackData)
             if addResult == .success {
                 successCount += 1
-                logger.debug("✅ Added \(notification) observer for \(appName)", category: .windowManager)
+                logger.debug("✅ Added \(notification) observer for \(appName)", category: .nativeBridge)
             } else {
                 let errorMsg = getAXErrorMessage(addResult)
-                logger.warning("❌ Failed to add \(notification) observer for \(appName): \(addResult.rawValue) (\(errorMsg))", category: .windowManager)
+                logger.warning("❌ Failed to add \(notification) observer for \(appName): \(addResult.rawValue) (\(errorMsg))", category: .nativeBridge)
             }
         }
         
         if successCount > 0 {
-            logger.info("✅ Window observer active for \(appName) (\(successCount)/\(notifications.count) notifications)", category: .windowManager)
+            logger.info("✅ Window observer active for \(appName) (\(successCount)/\(notifications.count) notifications)", category: .nativeBridge)
         } else {
-            logger.warning("⚠️ No notifications registered for \(appName) - observer may not work", category: .windowManager)
+            logger.warning("⚠️ No notifications registered for \(appName) - observer may not work", category: .nativeBridge)
         }
     }
     
@@ -346,7 +346,7 @@ class NativeDesktopBridge: ObservableObject {
             callbackData.deallocate()
         }
         
-        logger.debug("Removed window observer for PID: \(pid)", category: .windowManager)
+        logger.debug("Removed window observer for PID: \(pid)", category: .nativeBridge)
     }
     
     private func removeAllWindowObservers() {
@@ -362,35 +362,35 @@ class NativeDesktopBridge: ObservableObject {
         }
         callbackDataStorage.removeAll()
         
-        logger.debug("Removed all window observers", category: .windowManager)
+        logger.debug("Removed all window observers", category: .nativeBridge)
     }
     
     func handleWindowNotification(notification: String, element: AXUIElement, appPID: pid_t) {
-        logger.info("🔔 Window notification: \(notification) from PID: \(appPID)", category: .windowManager)
+        logger.info("🔔 Window notification: \(notification) from PID: \(appPID)", category: .nativeBridge)
         
         switch notification {
         case kAXWindowCreatedNotification:
-            logger.info("🆕 Window created", category: .windowManager)
+            logger.info("🆕 Window created", category: .nativeBridge)
             // Add delay to allow Core Graphics window list to update
             self.scheduleWindowListUpdate(reason: "window creation", initialDelay: 0.1)
             
         case kAXUIElementDestroyedNotification:
-            logger.info("🗑️ Window destroyed", category: .windowManager)
+            logger.info("🗑️ Window destroyed", category: .nativeBridge)
             // Add delay to allow Core Graphics window list to update
             self.scheduleWindowListUpdate(reason: "window destruction", initialDelay: 0.1)
             
         case kAXWindowMiniaturizedNotification:
-            logger.info("📦 Window minimized", category: .windowManager)
+            logger.info("📦 Window minimized", category: .nativeBridge)
             // Smaller delay for minimize/restore as these are state changes, not list changes
             self.scheduleWindowListUpdate(reason: "window minimize", initialDelay: 0.05)
             
         case kAXWindowDeminiaturizedNotification:
-            logger.info("📤 Window restored", category: .windowManager)
+            logger.info("📤 Window restored", category: .nativeBridge)
             // Smaller delay for minimize/restore as these are state changes, not list changes
             self.scheduleWindowListUpdate(reason: "window restore", initialDelay: 0.05)
             
         default:
-            logger.debug("Unknown window notification: \(notification)", category: .windowManager)
+            logger.debug("Unknown window notification: \(notification)", category: .nativeBridge)
         }
     }
     
@@ -403,35 +403,15 @@ class NativeDesktopBridge: ObservableObject {
         updateQueue.async {
             // Prevent duplicate updates for the same reason
             guard !self.pendingUpdates.contains(reason) else {
-                self.logger.debug("⏭️ Skipping duplicate update for \(reason)", category: .windowManager)
+                self.logger.debug("⏭️ Skipping duplicate update for \(reason)", category: .nativeBridge)
                 return
             }
             
             self.pendingUpdates.insert(reason)
             
             DispatchQueue.main.asyncAfter(deadline: .now() + initialDelay) {
-                self.logger.debug("🔄 Updating window list after \(reason) delay (\(Int(initialDelay * 1000))ms)", category: .windowManager)
-                
-                // Store window count before update
-                let windowsBefore = self.getAllWindows(includeOffscreen: false).count
-                
+                self.logger.debug("🔄 Updating window list after \(reason) delay (\(Int(initialDelay * 1000))ms)", category: .nativeBridge)
                 self.delegate?.onWindowListChanged()
-                
-                // Check if we should retry (for window creation events)
-                if reason.contains("creation") {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        let windowsAfter = self.getAllWindows(includeOffscreen: false).count
-                        self.logger.debug("📊 Window count: before=\(windowsBefore), after=\(windowsAfter)", category: .windowManager)
-                        
-                        // If no change detected and this was a creation event, try one more time
-                        if windowsAfter <= windowsBefore {
-                            self.logger.debug("🔄 Retrying window list update - no new windows detected", category: .windowManager)
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                                self.delegate?.onWindowListChanged()
-                            }
-                        }
-                    }
-                }
                 
                 // Remove from pending updates
                 self.updateQueue.async {
@@ -450,18 +430,28 @@ class NativeDesktopBridge: ObservableObject {
         let bounds: CGRect
         let layer: Int
         let isMinimized: Bool
+        let spaceID: UInt64
     }
     
     func getAllWindows(includeOffscreen: Bool = false) -> [NativeWindowInfo] {
+        let rawWindowDicts = getRawWindowDicts(includeOffscreen: includeOffscreen)
+        return convertWindowDictsToNativeWindowInfo(rawWindowDicts)
+    }
+    
+    private func getRawWindowDicts(includeOffscreen: Bool = false) -> [[String: Any]] {
         var options: CGWindowListOption = [.excludeDesktopElements]
         if !includeOffscreen {
             options.insert(.optionOnScreenOnly)
         }
         
-        let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] ?? []
-        var windowInfos: [NativeWindowInfo] = []
+        return CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] ?? []
+    }
+    
+    private func convertWindowDictsToNativeWindowInfo(_ windowDicts: [[String: Any]]) -> [NativeWindowInfo] {
+        var tempWindowInfos: [(windowID: CGWindowID, name: String, owner: String, bounds: CGRect, layer: Int, isMinimized: Bool)] = []
         
-        for windowDict in windowList {
+        // First pass: collect basic window information
+        for windowDict in windowDicts {
             guard let windowID = windowDict[kCGWindowNumber as String] as? CGWindowID,
                   let windowOwner = windowDict[kCGWindowOwnerName as String] as? String,
                   let windowBounds = windowDict[kCGWindowBounds as String] as? [String: Any],
@@ -475,13 +465,35 @@ class NativeDesktopBridge: ObservableObject {
             let windowName = windowDict[kCGWindowName as String] as? String ?? ""
             let windowLayer = windowDict[kCGWindowLayer as String] as? Int ?? 0
             
-            let windowInfo = NativeWindowInfo(
+            tempWindowInfos.append((
                 windowID: windowID,
                 name: windowName,
                 owner: windowOwner,
                 bounds: CGRect(x: x, y: y, width: width, height: height),
                 layer: windowLayer,
                 isMinimized: false // TODO: Detect minimized state
+            ))
+        }
+        
+        // Second pass: get space mapping for all windows
+        let windowIDs = tempWindowInfos.map { $0.windowID }
+        let spaceMap = getSpaceForWindows(windowIDs)
+
+        logger.info("🔍 Space map: \(spaceMap)", category: .nativeBridge)
+        
+        // Third pass: create final NativeWindowInfo objects with space information
+        var windowInfos: [NativeWindowInfo] = []
+        for tempInfo in tempWindowInfos {
+            let spaceID = spaceMap[tempInfo.windowID] ?? SLSGetActiveSpace(SLSMainConnectionID())
+            
+            let windowInfo = NativeWindowInfo(
+                windowID: tempInfo.windowID,
+                name: tempInfo.name,
+                owner: tempInfo.owner,
+                bounds: tempInfo.bounds,
+                layer: tempInfo.layer,
+                isMinimized: tempInfo.isMinimized,
+                spaceID: spaceID
             )
             
             windowInfos.append(windowInfo)
@@ -491,21 +503,195 @@ class NativeDesktopBridge: ObservableObject {
     }
     
     func getVisibleApplicationWindows() -> [NativeWindowInfo] {
-        return getAllWindows(includeOffscreen: false).filter { windowInfo in
+        // Get raw window dictionaries first
+        let rawWindowDicts = getRawWindowDicts(includeOffscreen: false)
+        
+        // Filter early before expensive space resolution
+        let filteredWindowDicts = rawWindowDicts.filter { windowDict in
+            guard let windowOwner = windowDict[kCGWindowOwnerName as String] as? String,
+                  let windowBounds = windowDict[kCGWindowBounds as String] as? [String: Any],
+                  let width = windowBounds["Width"] as? Double,
+                  let height = windowBounds["Height"] as? Double,
+                  let windowLayer = windowDict[kCGWindowLayer as String] as? Int else {
+                return false
+            }
+            
             // Skip system windows
             let systemApps = ["Bar", "Dock", "SystemUIServer", "ControlCenter", "NotificationCenter"]
-            if systemApps.contains(windowInfo.owner) {
+            if systemApps.contains(windowOwner) {
                 return false
             }
             
             // Skip tiny windows (likely UI elements)
-            if windowInfo.bounds.width < 100 || windowInfo.bounds.height < 100 {
+            if width < 100 || height < 100 {
                 return false
             }
             
             // Only normal layer windows
-            return windowInfo.layer == 0
+            return windowLayer == 0
         }
+        
+        logger.info("🎯 Filtered windows from \(rawWindowDicts.count) to \(filteredWindowDicts.count) before space resolution", category: .nativeBridge)
+        
+        // Now convert filtered dictionaries to NativeWindowInfo with space resolution
+        return convertWindowDictsToNativeWindowInfo(filteredWindowDicts)
+    }
+    
+    func getVisibleWindowsForSpace(_ spaceID: UInt64, includeMinimized: Bool = true) -> [NativeWindowInfo] {
+        logger.info("🔍 Getting windows for space \(spaceID), includeMinimized: \(includeMinimized)", category: .nativeBridge)
+        
+        let connectionID = SLSMainConnectionID()
+        guard connectionID != 0 else {
+            logger.warning("⚠️ Cannot get SLS Connection ID for space windows", category: .nativeBridge)
+            return []
+        }
+        
+        // Check if this is a valid space type (user or fullscreen managed space)
+        let spaceType = SLSSpaceGetType(connectionID, spaceID)
+        guard spaceType == 0 || spaceType == 4 else {
+            logger.warning("⚠️ Space \(spaceID) is not a user or fullscreen managed space (type: \(spaceType))", category: .nativeBridge)
+            return []
+        }
+        
+        // Set up parameters for SLSCopyWindowsWithOptionsAndTags
+        let owner: UInt32 = 0  // Any owner
+        let options: UInt32 = includeMinimized ? 0x7 : 0x2
+        var setTags: UInt64 = 0
+        var clearTags: UInt64 = 0
+        
+        // Create spaces list array
+        let spacesList = [NSNumber(value: spaceID)] as CFArray
+        
+        // Get window IDs for this space
+        guard let windowIDsRef = SLSCopyWindowsWithOptionsAndTags(connectionID, owner, spacesList, options, &setTags, &clearTags),
+              let windowIDs = windowIDsRef as? [NSNumber] else {
+            logger.warning("⚠️ SLSCopyWindowsWithOptionsAndTags returned no windows for space \(spaceID)", category: .nativeBridge)
+            return []
+        }
+        
+        logger.info("🔍 Found \(windowIDs.count) window IDs for space \(spaceID)", category: .nativeBridge)
+        
+        // Convert NSNumbers to CGWindowIDs
+        let cgWindowIDs = windowIDs.compactMap { $0.uint32Value }
+        
+        // Get detailed window information for each window ID
+        var windowInfos: [NativeWindowInfo] = []
+        
+        for windowID in cgWindowIDs {
+            // Use Core Graphics API to get window info for this specific window
+            let options: CGWindowListOption = [.optionIncludingWindow]
+            guard let windowList = CGWindowListCopyWindowInfo(options, CGWindowID(windowID)) as? [[String: Any]],
+                  let windowDict = windowList.first else {
+                logger.debug("Could not get window info for window \(windowID)", category: .nativeBridge)
+                continue
+            }
+            
+            // Extract window information
+            guard let windowOwner = windowDict[kCGWindowOwnerName as String] as? String,
+                  let windowBounds = windowDict[kCGWindowBounds as String] as? [String: Any],
+                  let x = windowBounds["X"] as? Double,
+                  let y = windowBounds["Y"] as? Double,
+                  let width = windowBounds["Width"] as? Double,
+                  let height = windowBounds["Height"] as? Double else {
+                continue
+            }
+            
+            let windowName = windowDict[kCGWindowName as String] as? String ?? ""
+            let windowLayer = windowDict[kCGWindowLayer as String] as? Int ?? 0
+            
+            // Apply same filtering as getVisibleApplicationWindows
+            let systemApps = ["Bar", "Dock", "SystemUIServer", "ControlCenter", "NotificationCenter"]
+            if systemApps.contains(windowOwner) {
+                continue
+            }
+            
+            // Skip tiny windows (likely UI elements)
+            if width < 100 || height < 100 {
+                continue
+            }
+            
+            // Only normal layer windows
+            if windowLayer != 0 {
+                continue
+            }
+            
+            // Create NativeWindowInfo
+            let windowInfo = NativeWindowInfo(
+                windowID: CGWindowID(windowID),
+                name: windowName,
+                owner: windowOwner,
+                bounds: CGRect(x: x, y: y, width: width, height: height),
+                layer: windowLayer,
+                isMinimized: false, // TODO: Detect minimized state properly
+                spaceID: spaceID
+            )
+            
+            windowInfos.append(windowInfo)
+        }
+        
+        logger.info("🎯 Returning \(windowInfos.count) filtered windows for space \(spaceID)", category: .nativeBridge)
+        return windowInfos
+    }
+    
+    // MARK: - Space Mapping
+    
+    private func getSpaceForWindows(_ windowIDs: [CGWindowID]) -> [CGWindowID: UInt64] {
+        var spaceMap: [CGWindowID: UInt64] = [:]
+        
+        guard !windowIDs.isEmpty else {
+            return spaceMap
+        }
+        
+        // Get current active space as fallback
+        let currentActiveSpaceID = SLSGetActiveSpace(SLSMainConnectionID())
+        
+        // Try to use SLSCopySpacesForWindows with correct parameters
+        let connectionID = SLSMainConnectionID()
+        guard connectionID != 0 else {
+            logger.warning("⚠️ Cannot get SLS Connection ID for window space mapping", category: .nativeBridge)
+            // Fallback: assume all windows are on current space
+            for windowID in windowIDs {
+                spaceMap[windowID] = currentActiveSpaceID
+            }
+            return spaceMap
+        }
+        
+        // Create CFArray of window IDs following Hammerspoon's approach
+        let windowIDNumbers = windowIDs.map { NSNumber(value: $0) }
+        let windowIDArray = windowIDNumbers as CFArray
+        
+        // Use space mask 0x7 (kCGSAllSpacesMask) as per Hammerspoon
+        let spaceMask: UInt32 = 0x7
+        
+        logger.debug("Attempting to get space info for \(windowIDs.count) windows with space mask 0x7", category: .nativeBridge)
+        
+        // Get space information for these windows with correct parameters
+        let spacesResult = SLSCopySpacesForWindows(connectionID, spaceMask, windowIDArray)
+        
+        if let spacesArray = spacesResult as? [NSNumber] {
+            logger.debug("Successfully got space info for \(spacesArray.count) windows", category: .nativeBridge)
+            
+            // The result is an array of space IDs (NSNumber), one per window
+            for (index, spaceNumber) in spacesArray.enumerated() {
+                guard index < windowIDs.count else { 
+                    logger.warning("Space info index \(index) out of bounds for window count \(windowIDs.count)", category: .nativeBridge)
+                    break 
+                }
+                
+                let windowID = windowIDs[index]
+                let spaceID = spaceNumber.uint64Value
+                spaceMap[windowID] = spaceID
+                logger.debug("Window \(windowID) mapped to space \(spaceID)", category: .nativeBridge)
+            }
+        } else {
+            logger.warning("SLSCopySpacesForWindows returned nil or invalid format", category: .nativeBridge)
+            // Fallback: assume all windows are on current space
+            for windowID in windowIDs {
+                spaceMap[windowID] = currentActiveSpaceID
+            }
+        }
+        
+        return spaceMap
     }
     
     // MARK: - Focus Detection
@@ -523,7 +709,7 @@ class NativeDesktopBridge: ObservableObject {
         
         // Get frontmost application
         guard let frontmostApp = NSWorkspace.shared.frontmostApplication else {
-            logger.debug("No frontmost application found", category: .focusSwitching)
+            logger.debug("No frontmost application found", category: .nativeBridge)
             return nil
         }
         
@@ -560,6 +746,8 @@ class NativeDesktopBridge: ObservableObject {
     private func getWindowOrderingFocusedWindow(frontmostApp: NSRunningApplication) -> CGWindowID? {
         let appName = frontmostApp.localizedName ?? "Unknown"
         let windowList = getAllWindows(includeOffscreen: false)
+
+        logger.info("Got all windows for ordering focused window: \(windowList.count)", category: .nativeBridge)
         
         // Find the first (frontmost) window belonging to the frontmost app
         for windowInfo in windowList {
@@ -678,7 +866,7 @@ class NativeDesktopBridge: ObservableObject {
         
         // First activate the application
         if let app = getAppForWindow(windowID: windowID) {
-            logger.info("Activating app: \(app.localizedName ?? "Unknown")", category: .focusSwitching)
+            logger.info("Activating app: \(app.localizedName ?? "Unknown")", category: .nativeBridge)
             app.activate()
         }
         
@@ -701,12 +889,12 @@ class NativeDesktopBridge: ObservableObject {
     // Dynamic loading of private APIs
     private func loadPrivateAPIs() -> (getProcessForPID: ((pid_t, inout ProcessSerialNumber) -> OSStatus)?, setFrontProcess: ((inout ProcessSerialNumber, UInt32, UInt32) -> CGError)?, postEventRecord: ((inout ProcessSerialNumber, inout UInt8) -> CGError)?) {
         guard let coreGraphicsHandle = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_NOW) else {
-            logger.debug("🔧 Failed to load CoreGraphics framework", category: .focusSwitching)
+            logger.debug("🔧 Failed to load CoreGraphics framework", category: .nativeBridge)
             return (nil, nil, nil)
         }
         
         guard let applicationServicesHandle = dlopen("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices", RTLD_NOW) else {
-            logger.debug("🔧 Failed to load ApplicationServices framework", category: .focusSwitching)
+            logger.debug("🔧 Failed to load ApplicationServices framework", category: .nativeBridge)
             return (nil, nil, nil)
         }
         
@@ -757,10 +945,10 @@ class NativeDesktopBridge: ObservableObject {
     }
     
     private func activateWindowWithCoreGraphics(windowID: CGWindowID) -> Bool {
-        logger.debug("🔧 Trying Amethyst-style activation for window ID: \(windowID)", category: .focusSwitching)
+        logger.debug("🔧 Trying Amethyst-style activation for window ID: \(windowID)", category: .nativeBridge)
         
         guard let app = getAppForWindow(windowID: windowID) else {
-            logger.debug("🔧 Could not get app for window ID: \(windowID)", category: .focusSwitching)
+            logger.debug("🔧 Could not get app for window ID: \(windowID)", category: .nativeBridge)
             return false
         }
         
@@ -772,21 +960,21 @@ class NativeDesktopBridge: ObservableObject {
         let (getProcessForPID, setFrontProcess, postEventRecord) = loadPrivateAPIs()
         
         guard let getProcessForPID = getProcessForPID, let setFrontProcess = setFrontProcess, let postEventRecord = postEventRecord else {
-            logger.debug("🔧 Failed to load private APIs", category: .focusSwitching)
+            logger.debug("🔧 Failed to load private APIs", category: .nativeBridge)
             return false
         }
         
         // Step 2: Get process serial number for the PID
         let processStatus = getProcessForPID(pid, &psn)
         guard processStatus == noErr else {
-            logger.debug("🔧 GetProcessForPID failed with status: \(processStatus)", category: .focusSwitching)
+            logger.debug("🔧 GetProcessForPID failed with status: \(processStatus)", category: .nativeBridge)
             return false
         }
         
         // Step 4: Set front process with specific window ID
         var cgStatus = setFrontProcess(&psn, wid, kCPSUserGenerated)
         guard cgStatus == .success else {
-            logger.debug("🔧 _SLPSSetFrontProcessWithOptions failed with status: \(cgStatus)", category: .focusSwitching)
+            logger.debug("🔧 _SLPSSetFrontProcessWithOptions failed with status: \(cgStatus)", category: .nativeBridge)
             return false
         }
         
@@ -804,12 +992,12 @@ class NativeDesktopBridge: ObservableObject {
             }
             
             guard cgStatus == .success else {
-                logger.debug("🔧 SLPSPostEventRecordTo failed with status: \(cgStatus) for byte: \(byte)", category: .focusSwitching)
+                logger.debug("🔧 SLPSPostEventRecordTo failed with status: \(cgStatus) for byte: \(byte)", category: .nativeBridge)
                 return false
             }
         }
         
-        logger.debug("🔧 Amethyst-style activation SUCCESS for window ID: \(windowID)", category: .focusSwitching)
+        logger.debug("🔧 Amethyst-style activation SUCCESS for window ID: \(windowID)", category: .nativeBridge)
         return true
     }
     
@@ -897,14 +1085,18 @@ class NativeDesktopBridge: ObservableObject {
     }
     
     private func getAppForWindow(windowID: CGWindowID) -> NSRunningApplication? {
-        let windowList = getAllWindows(includeOffscreen: true)
-        
-        guard let windowInfo = windowList.first(where: { $0.windowID == windowID }) else {
+        // Use Core Graphics API for single window (much more efficient than getAllWindows)
+        let options: CGWindowListOption = [.optionIncludingWindow]
+        guard let windowList = CGWindowListCopyWindowInfo(options, windowID) as? [[String: Any]],
+              let windowDict = windowList.first,
+              let ownerName = windowDict[kCGWindowOwnerName as String] as? String else {
+            logger.warning("Could not get window owner for window \(windowID)", category: .nativeBridge)
             return nil
         }
         
+        logger.debug("Found app via efficient CGWindowInfo: \(ownerName) for window \(windowID)", category: .nativeBridge)
         return NSWorkspace.shared.runningApplications
-            .first(where: { $0.localizedName == windowInfo.owner })
+            .first(where: { $0.localizedName == ownerName })
     }
     
     private func getWindowIDFromAXWindow(_ axWindow: AXUIElement) -> CGWindowID? {
@@ -933,6 +1125,7 @@ class NativeDesktopBridge: ObservableObject {
         guard let axBounds = getWindowBounds(from: axWindow) else { return nil }
         
         let windowList = getAllWindows(includeOffscreen: true)
+        logger.info("Got all windows for position matching: \(windowList.count)", category: .nativeBridge)
         let tolerance: Double = 5.0
         
         for windowInfo in windowList {

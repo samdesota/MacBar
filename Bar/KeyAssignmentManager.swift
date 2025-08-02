@@ -237,7 +237,8 @@ extension KeyAssignmentManager {
         name: String,
         owner: String,
         isActive: Bool = false,
-        forceShowTitle: Bool = false
+        forceShowTitle: Bool = false,
+        spaceID: UInt64 = 1
     ) -> WindowInfo {
         return WindowInfo(
             id: id,
@@ -245,7 +246,8 @@ extension KeyAssignmentManager {
             owner: owner,
             icon: nil,
             isActive: isActive,
-            forceShowTitle: forceShowTitle
+            forceShowTitle: forceShowTitle,
+            spaceID: spaceID
         )
     }
     

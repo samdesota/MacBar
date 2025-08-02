@@ -12,14 +12,21 @@ import ApplicationServices
 import Darwin
 
 class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
-    @Published var openWindows: [WindowInfo] = []
+    @Published var spaceWindows: [UInt64: [WindowInfo]] = [:] // Maps space IDs to their windows
     @Published var hasAccessibilityPermission: Bool = false
     @Published var debugInfo: String = ""
+    @Published var currentSpaceID: String = ""
+    
     private var timer: Timer?
     private var windowOrder: [CGWindowID] = [] // Track order by window ID
     private var taskbarHeight: CGFloat = 42
     private var taskbarY: CGFloat = 0
     private let logger = Logger.shared
+    private let spaceManager = SpaceManager.shared
+    private var cancellables = Set<AnyCancellable>()
+    
+    // Space-based window tracking
+    private var currentActiveSpaceID: UInt64 = 0
     
     // Window cache to avoid duplicate bridge calls
     private struct WindowCache {
@@ -31,6 +38,18 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
         }
     }
     private var windowCache: WindowCache?
+    
+    // Space-specific window cache
+    private struct SpaceWindowCache {
+        let windows: [NativeDesktopBridge.NativeWindowInfo]
+        let timestamp: Date
+        let spaceID: UInt64
+        
+        func isValid(maxAge: TimeInterval = 0.064) -> Bool {
+            return Date().timeIntervalSince(timestamp) < maxAge
+        }
+    }
+    private var spaceWindowCache: SpaceWindowCache?
     
     // Cache management methods
     private func getCachedWindows() -> [NativeDesktopBridge.NativeWindowInfo]? {
@@ -44,6 +63,22 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
         windowCache = WindowCache(windows: windows, timestamp: Date())
     }
     
+    // Space-specific cache management methods
+    private func getCachedWindowsForSpace(_ spaceID: UInt64) -> [NativeDesktopBridge.NativeWindowInfo]? {
+        if let cache = spaceWindowCache, cache.isValid() && cache.spaceID == spaceID {
+            return cache.windows
+        }
+        return nil
+    }
+    
+    private func updateSpaceCache(windows: [NativeDesktopBridge.NativeWindowInfo], spaceID: UInt64) {
+        spaceWindowCache = SpaceWindowCache(windows: windows, timestamp: Date(), spaceID: spaceID)
+    }
+    
+    private func invalidateSpaceCache() {
+        spaceWindowCache = nil
+    }
+    
     /// Gets visible windows from cache if valid, otherwise fetches fresh data and updates cache
     private func getVisibleWindowsWithCache() -> [NativeDesktopBridge.NativeWindowInfo] {
         if let cachedWindows = getCachedWindows() {
@@ -55,16 +90,37 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
         }
     }
     
+    /// Gets visible windows for a specific space using the more efficient space-specific API with caching
+    private func getVisibleWindowsForSpace(_ spaceID: UInt64, includeMinimized: Bool = true) -> [NativeDesktopBridge.NativeWindowInfo] {
+        if let cachedWindows = getCachedWindowsForSpace(spaceID) {
+            return cachedWindows
+        } else {
+            let freshWindows = nativeBridge.getVisibleWindowsForSpace(spaceID, includeMinimized: includeMinimized)
+            updateSpaceCache(windows: freshWindows, spaceID: spaceID)
+            return freshWindows
+        }
+    }
+    
     // Native desktop bridge for all low-level windowing operations
     private let nativeBridge = NativeDesktopBridge()
     
     init() {
         let instanceID = UUID().uuidString.prefix(8)
-        logger.info("🏗️ WindowManager initialized [\(instanceID)]", category: .focusSwitching)
+        logger.info("🏗️ WindowManager initialized [\(instanceID)]", category: .windowManager)
         nativeBridge.delegate = self
         checkAccessibilityPermission()
         startMonitoring()
         setupTaskbarPosition()
+        
+        // Initialize with current active space
+        let connectionID = SLSMainConnectionID()
+        if connectionID != 0 {
+            currentActiveSpaceID = SLSGetActiveSpace(connectionID)
+            logger.info("🏗️ WindowManager initialized with space: \(currentActiveSpaceID)", category: .windowManager)
+        } else {
+            logger.warning("⚠️ Cannot get SLS Connection ID for initial space", category: .windowManager)
+            currentActiveSpaceID = 0
+        }
     }
     
     deinit {
@@ -91,7 +147,8 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
                 self.debugInfo = "Accessibility permission required. Please grant permission in System Preferences > Security & Privacy > Privacy > Accessibility"
                 self.logger.warning("Accessibility permission not granted", category: .accessibility)
             } else {
-                self.debugInfo = "Found \(self.openWindows.count) windows"
+                let totalWindows = self.spaceWindows.values.flatMap { $0 }.count
+                self.debugInfo = "Found \(totalWindows) windows across all spaces"
             }
         }
     }
@@ -118,9 +175,10 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
         
         // Set up timer for periodic updates (safety net only - window observers handle real-time updates)
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            self?.checkAccessibilityPermission()
-            self?.updateWindowList() // Full window list refresh every 5 minutes as safety net
-            self?.preventTaskbarOverlap()
+            guard let self = self else { return }
+            self.checkAccessibilityPermission()
+            self.updateWindowList() // Full window list refresh every 10 seconds as safety net
+            self.preventTaskbarOverlap()
         }
         
         // Refresh observers after a delay to ensure everything is set up properly
@@ -141,6 +199,28 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
         timer = nil
     }
     
+    func updateCurrentSpace(_ spaceID: UInt64) {
+        if currentActiveSpaceID != spaceID {
+            logger.info("🔄 Space changed from \(currentActiveSpaceID) to \(spaceID)", category: .windowManager)
+            currentActiveSpaceID = spaceID
+            // Invalidate space cache since we're switching to a different space
+            invalidateSpaceCache()
+            updateWindowList()
+        }
+    }
+    
+    // MARK: - Space Management
+    
+    func getWindowsForCurrentSpace() -> [WindowInfo] {
+        return spaceWindows[currentActiveSpaceID] ?? []
+    }
+    
+    func getWindowsForSpace(_ spaceID: UInt64) -> [WindowInfo] {
+        return spaceWindows[spaceID] ?? []
+    }
+    
+
+    
     // MARK: - NativeDesktopBridgeDelegate
     
     func onFocusedWindowChanged(windowID: CGWindowID?) {
@@ -156,28 +236,32 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
     
     func onWindowListChanged() {
         logger.info("📋 Window list changed", category: .windowManager)
-        // Invalidate cache since window list changed
+        // Invalidate both caches since window list changed
         windowCache = nil
+        invalidateSpaceCache()
         updateWindowList()
     }
     
     func onAppLaunched(app: NSRunningApplication) {
         logger.info("🚀 Detected app launch: \(app.localizedName ?? "Unknown")", category: .windowManager)
-        // Invalidate cache since app launch may change window list
+        // Invalidate both caches since app launch may change window list
         windowCache = nil
+        invalidateSpaceCache()
         // Window list will be updated via onWindowListChanged()
     }
     
     func onAppTerminated(app: NSRunningApplication) {
         logger.info("🛑 Detected app termination: \(app.localizedName ?? "Unknown")", category: .windowManager)
-        // Invalidate cache since app termination may change window list
+        // Invalidate both caches since app termination may change window list
         windowCache = nil
+        invalidateSpaceCache()
         // Window list will be updated via onWindowListChanged()
     }
     
     /// Fast update of just the focus status for existing windows (reactive)
     private func updateWindowFocusStatus() {
-        logger.info("🔄 STARTING reactive focus update for \(openWindows.count) windows", category: .focusSwitching)
+        let currentSpaceWindows = spaceWindows[currentActiveSpaceID] ?? []
+        logger.info("🔄 STARTING reactive focus update for \(currentSpaceWindows.count) windows in space \(currentActiveSpaceID)", category: .focusSwitching)
         
         let startTime = Date()
         var focusChanges: [String] = []
@@ -187,13 +271,13 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
         logger.info("🔎 Detected focused window ID: \(focusedWindowID ?? 0)", category: .focusSwitching)
         
         // Log all current window IDs for comparison
-        logger.info("📋 Current windows in array:", category: .focusSwitching)
-        for window in openWindows {
+        logger.info("📋 Current windows in space \(currentActiveSpaceID):", category: .focusSwitching)
+        for window in currentSpaceWindows {
             logger.info("  - ID: \(window.id), Name: \(window.displayName), Owner: \(window.owner), WasActive: \(window.isActive)", category: .focusSwitching)
         }
         
-        // Update isActive status for existing windows
-        let updatedWindows = openWindows.map { window in
+        // Update isActive status for existing windows in the current space
+        let updatedWindows = currentSpaceWindows.map { window in
             let wasActive = window.isActive
             let isNowActive = (focusedWindowID == window.id)
             
@@ -211,7 +295,8 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
                 owner: window.owner,
                 icon: window.icon,
                 isActive: isNowActive,
-                forceShowTitle: window.forceShowTitle
+                forceShowTitle: window.forceShowTitle,
+                spaceID: window.spaceID
             )
         }
         
@@ -226,34 +311,75 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
             }
         }
         
-        // Update on main thread
+        // Update on main thread - only update the current space
         DispatchQueue.main.async {
-            self.logger.info("🎨 Updating SwiftUI @Published openWindows array", category: .focusSwitching)
-            self.openWindows = updatedWindows
+            self.logger.info("🎨 Updating SwiftUI @Published spaceWindows for space \(self.currentActiveSpaceID)", category: .focusSwitching)
+            self.spaceWindows[self.currentActiveSpaceID] = updatedWindows
             self.logger.info("✅ SwiftUI update completed", category: .focusSwitching)
         }
     }
     
     func updateWindowList() {
-        logger.info("🔄 STARTING full window list update (timer-based)", category: .focusSwitching)
-        let windows = getVisibleWindows()
+        logger.info("🔄 STARTING window list update for current space: \(currentActiveSpaceID)", category: .windowManager)
+        
+        // Use the more efficient space-specific method to get windows for current space only
+        let nativeWindows = getVisibleWindowsForSpace(currentActiveSpaceID, includeMinimized: true)
+        
+        logger.debug("Found \(nativeWindows.count) native windows for space \(currentActiveSpaceID)", category: .windowManager)
+        
+        // Convert native windows to WindowInfo format
+        var windowInfos: [WindowInfo] = []
+        var newWindowOrder: [CGWindowID] = []
+        
+        for nativeWindow in nativeWindows {
+            // Get app icon from bridge
+            let appIcon = nativeBridge.getAppIcon(for: nativeWindow.owner)
+            
+            // Try to get a better window title from bridge
+            let betterWindowName = nativeBridge.getWindowTitle(windowID: nativeWindow.windowID) ?? nativeWindow.name
+            
+            let windowInfo = WindowInfo(
+                id: nativeWindow.windowID,
+                name: betterWindowName.isEmpty ? nativeWindow.name : betterWindowName,
+                owner: nativeWindow.owner,
+                icon: appIcon,
+                isActive: isWindowActive(nativeWindow.windowID),
+                spaceID: nativeWindow.spaceID
+            )
+            
+            // Add window if not already present
+            if !windowInfos.contains(where: { $0.id == windowInfo.id }) {
+                windowInfos.append(windowInfo)
+                newWindowOrder.append(nativeWindow.windowID)
+                logger.debug("Added window: \(nativeWindow.owner) - \(nativeWindow.name) (ID: \(nativeWindow.windowID))", category: .windowManager)
+            }
+        }
+        
+        // Apply order stabilization to maintain consistent window ordering
+        let orderedWindows = maintainStableOrderByWindow(currentWindows: windowInfos, newOrder: newWindowOrder)
+        
+        // Update display names based on whether there are multiple windows per app
+        let currentSpaceWindows = updateDisplayNamesForMultipleWindows(orderedWindows)
         
         DispatchQueue.main.async {
-            self.logger.info("🎨 Updating SwiftUI @Published openWindows (full refresh: \(windows.count) windows)", category: .focusSwitching)
-            self.openWindows = windows
-            self.debugInfo = "Found \(windows.count) windows"
+            self.logger.info("🎨 Updating space \(self.currentActiveSpaceID) windows: \(currentSpaceWindows.count) windows using space-specific API", category: .windowManager)
+            
+            // Only update the windows for the current active space, leave other spaces alone
+            self.spaceWindows[self.currentActiveSpaceID] = currentSpaceWindows
+            
+            self.debugInfo = "Found \(currentSpaceWindows.count) windows for current space \(self.currentActiveSpaceID)"
             
             // Debug: Show each window ID and focus status
             let currentFocusedID = self.nativeBridge.getFocusedWindowID()
-            self.logger.info("🔎 Current focused window ID: \(currentFocusedID ?? 0)", category: .focusSwitching)
-            self.logger.info("📋 Window list with focus status:", category: .focusSwitching)
-            for window in windows {
+            self.logger.info("🔎 Current focused window ID: \(currentFocusedID ?? 0)", category: .windowManager)
+            self.logger.info("📋 Window list for space \(self.currentActiveSpaceID):", category: .windowManager)
+            for window in currentSpaceWindows {
                 let isFocused = (currentFocusedID == window.id)
                 let focusEmoji = isFocused ? "🔥" : "😴"
-                self.logger.info("  \(focusEmoji) ID: \(window.id), Name: \(window.displayName), Owner: \(window.owner), IsActive: \(window.isActive), ShouldBeFocused: \(isFocused)", category: .focusSwitching)
+                self.logger.info("  \(focusEmoji) ID: \(window.id), Name: \(window.displayName), Owner: \(window.owner), Space: space-\(window.spaceID), IsActive: \(window.isActive), ShouldBeFocused: \(isFocused)", category: .windowManager)
             }
             
-            self.logger.info("✅ Full window list update completed", category: .focusSwitching)
+            self.logger.info("✅ Window list update completed for space \(self.currentActiveSpaceID)", category: .windowManager)
         }
     }
     
@@ -324,13 +450,15 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
         var windowInfos: [WindowInfo] = []
         var newWindowOrder: [CGWindowID] = []
         
-        // Get all visible application windows from bridge (or cache)
+        // Get all visible application windows from bridge (now includes space mapping)
         let nativeWindows = getVisibleWindowsWithCache()
         
         logger.debug("Total windows found: \(nativeWindows.count)", category: .windowManager)
         
+
+        
         for (index, nativeWindow) in nativeWindows.enumerated() {
-            logger.debug("Window \(index): \(nativeWindow.owner) - \(nativeWindow.name) (Layer: \(nativeWindow.layer))", category: .windowManager)
+            logger.debug("Window \(index): \(nativeWindow.owner) - \(nativeWindow.name) (Layer: \(nativeWindow.layer), Space: \(nativeWindow.spaceID))", category: .windowManager)
             
             // Get app icon from bridge
             let appIcon = nativeBridge.getAppIcon(for: nativeWindow.owner)
@@ -343,14 +471,15 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
                 name: betterWindowName.isEmpty ? nativeWindow.name : betterWindowName,
                 owner: nativeWindow.owner,
                 icon: appIcon,
-                isActive: isWindowActive(nativeWindow.windowID)
+                isActive: isWindowActive(nativeWindow.windowID),
+                spaceID: nativeWindow.spaceID
             )
             
             // Add each window individually
             if !windowInfos.contains(where: { $0.id == windowInfo.id }) {
                 windowInfos.append(windowInfo)
                 newWindowOrder.append(nativeWindow.windowID)
-                logger.debug("Added window: \(nativeWindow.owner) - \(nativeWindow.name) (ID: \(nativeWindow.windowID))", category: .windowManager)
+                logger.debug("Added window: \(nativeWindow.owner) - \(nativeWindow.name) (ID: \(nativeWindow.windowID), Space: \(nativeWindow.spaceID))", category: .windowManager)
             }
         }
         
@@ -367,8 +496,9 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
         var orderedWindows: [WindowInfo] = []
         var usedWindowIDs: Set<CGWindowID> = []
         
-        // First, add existing windows in their current order
-        for window in openWindows {
+        // First, add existing windows in their current order (from current space)
+        let existingWindows = spaceWindows[currentActiveSpaceID] ?? []
+        for window in existingWindows {
             if let newWindow = currentWindows.first(where: { $0.id == window.id }) {
                 orderedWindows.append(newWindow)
                 usedWindowIDs.insert(window.id)
@@ -406,7 +536,8 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
                 owner: window.owner,
                 icon: window.icon,
                 isActive: window.isActive,
-                forceShowTitle: hasMultipleWindows
+                forceShowTitle: hasMultipleWindows,
+                spaceID: window.spaceID
             )
             
             updatedWindows.append(updatedWindow)
@@ -476,14 +607,16 @@ struct WindowInfo: Identifiable, Equatable {
     let icon: NSImage?
     let isActive: Bool
     let forceShowTitle: Bool
+    let spaceID: UInt64
     
-    init(id: CGWindowID, name: String, owner: String, icon: NSImage?, isActive: Bool, forceShowTitle: Bool = false) {
+    init(id: CGWindowID, name: String, owner: String, icon: NSImage?, isActive: Bool, forceShowTitle: Bool = false, spaceID: UInt64) {
         self.id = id
         self.name = name
         self.owner = owner
         self.icon = icon
         self.isActive = isActive
         self.forceShowTitle = forceShowTitle
+        self.spaceID = spaceID
     }
     
     var displayName: String {

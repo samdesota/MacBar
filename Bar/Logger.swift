@@ -21,6 +21,8 @@ class Logger: ObservableObject {
         case debug = "Debug"
         case keyboardSwitching = "KeyboardSwitching"
         case focusSwitching = "FocusSwitching"
+        case spaceManagement = "SpaceManagement"
+        case nativeBridge = "NativeBridge"
     }
     
     @Published var enabledCategories: Set<LogCategory> = []
@@ -29,7 +31,7 @@ class Logger: ObservableObject {
     
     private init() {
         // Enable accessibility and window positioning logging by default for debugging
-        enabledCategories = [.temporary]
+        enabledCategories = [.spaceManagement, .windowManager, .nativeBridge]
     }
     
     func enableCategory(_ category: LogCategory) {

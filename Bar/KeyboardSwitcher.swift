@@ -322,7 +322,7 @@ class KeyboardSwitcher: ObservableObject {
         
         // Use real window data if WindowManager is connected, otherwise use mock data for testing
         if let windowManager = windowManager {
-            windows = windowManager.openWindows
+            windows = windowManager.getWindowsForCurrentSpace()
             logger.info("Using real window data: \(windows.count) windows", category: .keyboardSwitching)
         } else {
             windows = KeyAssignmentManager.generateMockWindows()

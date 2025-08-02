@@ -7,6 +7,7 @@
 
 import SwiftUI
 import AppKit
+import Combine
 
 
 
@@ -22,12 +23,16 @@ struct BarApp: App {
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
-    var dockWindow: NSWindow?
+    var dockWindows: [String: NSWindow] = [:] // Space ID -> Window mapping
     var permissionWindow: NSWindow?
     var settingsWindow: NSWindow?
     private let logger = Logger.shared
     private let keyboardSwitcher = KeyboardSwitcher.shared
     private let keyboardPermissionManager = KeyboardPermissionManager.shared
+    private let spaceManager = SpaceManager.shared
+    private let windowManager = WindowManager() // Single WindowManager instance
+    private var cancellables = Set<AnyCancellable>()
+    private var currentActiveSpaceID: String = ""
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Hide app from dock
@@ -118,34 +123,52 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func createDockWindow() {
-        logger.info("Creating taskbar window", category: .taskbar)
+        logger.info("Creating initial taskbar window", category: .taskbar)
         
         // Start keyboard switching functionality after window is created
         initializeKeyboardSwitching()
         
-        // Create WindowManager for the content view
-        let windowManager = WindowManager()
-        let contentView = NSHostingView(rootView: ContentView().environmentObject(windowManager))
+        // Create initial taskbar window for current space
+        createTaskbarWindowForCurrentSpace()
+        
+        // Set up space change observer to create windows for new spaces
+        setupSpaceChangeObserver()
+    }
+    
+    private func createTaskbarWindowForCurrentSpace() {
+        let currentSpaceID = spaceManager.currentSpaceID.isEmpty ? "space-0" : spaceManager.currentSpaceID
+        
+        // Check if we already have a window for this space
+        if dockWindows[currentSpaceID] != nil {
+            logger.info("Taskbar window already exists for space: \(currentSpaceID)", category: .taskbar)
+            return
+        }
+        
+        logger.info("Creating taskbar window for space: \(currentSpaceID)", category: .taskbar)
+        
+        // Use the single WindowManager instance
+        let windowManager = self.windowManager
+        
+        let contentView = NSHostingView(rootView: ContentView(spaceID: currentSpaceID).environmentObject(windowManager))
         
         // Get screen width to make taskbar full width
         let screenWidth = NSScreen.main?.visibleFrame.width ?? 1200
         
-        dockWindow = NSWindow(
+        let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: screenWidth - 10, height: 42),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
         )
         
-        guard let window = dockWindow else { return }
-        
         window.contentView = contentView
         window.backgroundColor = NSColor.clear
         window.isOpaque = false
         window.hasShadow = false
         window.level = .floating
-        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .transient]
-        window.isMovableByWindowBackground = false
+        
+        // Set collection behavior to NOT join all spaces - this makes it space-specific
+        window.collectionBehavior = [.stationary, .ignoresCycle]
         
         // Position at bottom of screen, full width
         if let screen = NSScreen.main {
@@ -155,10 +178,55 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             window.setFrameOrigin(NSPoint(x: x, y: y))
         }
         
+        // Store window for this space
+        dockWindows[currentSpaceID] = window
+        
+        // Show the window
         window.makeKeyAndOrderFront(nil)
+        logger.info("Created and showed taskbar window for space: \(currentSpaceID)", category: .taskbar)
         
         // Connect WindowManager to KeyboardSwitcher for real window data
         keyboardSwitcher.connectWindowManager(windowManager)
+        
+        // Set this as the active space
+        currentActiveSpaceID = currentSpaceID
+    }
+    
+
+    
+    private func setupSpaceChangeObserver() {
+        // Observe space changes to update the WindowManager
+        spaceManager.$currentSpaceID
+            .sink { [weak self] newSpaceID in
+                self?.handleSpaceChange(newSpaceID)
+            }
+            .store(in: &cancellables)
+    }
+    
+    private func handleSpaceChange(_ newSpaceID: String) {
+        logger.info("🔄 Space change detected: \(newSpaceID)", category: .spaceManagement)
+        
+        // Update current active space
+        currentActiveSpaceID = newSpaceID
+        
+        // Update the WindowManager with the new space ID
+        if let spaceID = UInt64(newSpaceID.replacingOccurrences(of: "space-", with: "")) {
+            windowManager.updateCurrentSpace(spaceID)
+        }
+        
+        // Check if we should show taskbar on this space
+        if !spaceManager.shouldShowTaskbarOnCurrentSpace() {
+            logger.info("🚫 Skipping taskbar on full screen space", category: .spaceManagement)
+            return
+        }
+        
+        // Check if we need to create a taskbar window for this space
+        if dockWindows[newSpaceID] == nil {
+            logger.info("🆕 Creating new taskbar window for space: \(newSpaceID)", category: .spaceManagement)
+            createTaskbarWindowForCurrentSpace()
+        } else {
+            logger.info("✅ Taskbar window already exists for space: \(newSpaceID)", category: .spaceManagement)
+        }
     }
     
     private func initializeKeyboardSwitching() {
