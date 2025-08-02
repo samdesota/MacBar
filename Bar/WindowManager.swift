@@ -315,7 +315,7 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
     private func activateAppToBringWindowToFront(windowOwner: String) {
         // Try to activate the app, which might bring its windows to a better position
         if let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == windowOwner }) {
-            app.activate(options: .activateIgnoringOtherApps)
+            app.activate()
             logger.info("Activated app \(windowOwner) as fallback", category: .windowPositioning)
         }
     }
@@ -441,8 +441,8 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
             logger.warning("Failed to activate window: \(windowInfo.displayName), error: \(error)", category: .focusSwitching)
             // Fall back to activating the app
             if let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == windowInfo.owner }) {
-                app.activate(options: .activateIgnoringOtherApps)
-                logger.info("Successfully activated app as fallback: \(app.localizedName)", category: .focusSwitching)
+                app.activate()
+                logger.info("Successfully activated app as fallback: \(app.localizedName ?? "Unknown")", category: .focusSwitching)
             }
         case .permissionDenied:
             logger.warning("Permission denied for activating window: \(windowInfo.displayName)", category: .focusSwitching)
