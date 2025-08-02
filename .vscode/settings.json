@@ -1,0 +1,22 @@
+{
+    "swift.sourcekit-lsp.serverPath": "/usr/bin/xcrun",
+    "swift.sourcekit-lsp.serverArguments": [
+        "sourcekit-lsp"
+    ],
+    "swift.disableAutoSourcekitLsp": false,
+    "swift.path": "/usr/bin/xcrun",
+    "swift.args": [
+        "swift"
+    ],
+    "files.associations": {
+        "*.swift": "swift"
+    },
+    "search.exclude": {
+        "**/.build": true,
+        "**/Packages": true,
+        "**/.swiftpm": true,
+        "**/DerivedData": true,
+        "**/*.xcodeproj/xcuserdata": true,
+        "**/*.xcodeproj/project.xcworkspace/xcuserdata": true
+    }
+}
