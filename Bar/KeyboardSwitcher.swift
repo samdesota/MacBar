@@ -182,7 +182,6 @@ class KeyboardSwitcher: ObservableObject {
     }
     
     private func handleKeyEvent(_ event: NSEvent, isKeyDown: Bool, isGlobal: Bool) {
-        let eventType = isKeyDown ? "DOWN" : "UP"
         let scope = isGlobal ? "GLOBAL" : "LOCAL"
         
         if event.type == .flagsChanged {
@@ -338,7 +337,6 @@ class KeyboardSwitcher: ObservableObject {
         keyAssignmentManager.assignKeys(to: windows)
         
         // Log the assignments
-        let assignments = keyAssignmentManager.getAllAssignments()
         logger.info("Key assignments for \(windows.count) windows:", category: .keyboardSwitching)
         
         for window in windows {
@@ -570,7 +568,7 @@ class KeyboardSwitcher: ObservableObject {
     private func activateWindowFallback(_ window: WindowInfo) {
         // Try to find and activate the application
         if let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == window.owner }) {
-            app.activate(options: .activateIgnoringOtherApps)
+            app.activate()
             logger.info("Successfully activated app via fallback: \(window.owner)", category: .keyboardSwitching)
         } else {
             logger.warning("Could not find app for fallback activation: \(window.owner)", category: .keyboardSwitching)

@@ -67,7 +67,7 @@ class NativeDesktopBridge: ObservableObject {
     
     init() {
         logger.info("🌉 NativeDesktopBridge initialized", category: .general)
-        checkAccessibilityPermission()
+        _ = checkAccessibilityPermission()
         setupEventListeners()
     }
     
@@ -350,7 +350,7 @@ class NativeDesktopBridge: ObservableObject {
     }
     
     private func removeAllWindowObservers() {
-        for (pid, observer) in appObservers {
+        for (_, observer) in appObservers {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
         }
         appObservers.removeAll()
@@ -369,22 +369,22 @@ class NativeDesktopBridge: ObservableObject {
         logger.info("🔔 Window notification: \(notification) from PID: \(appPID)", category: .windowManager)
         
         switch notification {
-        case kAXWindowCreatedNotification as String:
+        case kAXWindowCreatedNotification:
             logger.info("🆕 Window created", category: .windowManager)
             // Add delay to allow Core Graphics window list to update
             self.scheduleWindowListUpdate(reason: "window creation", initialDelay: 0.1)
             
-        case kAXUIElementDestroyedNotification as String:
+        case kAXUIElementDestroyedNotification:
             logger.info("🗑️ Window destroyed", category: .windowManager)
             // Add delay to allow Core Graphics window list to update
             self.scheduleWindowListUpdate(reason: "window destruction", initialDelay: 0.1)
             
-        case kAXWindowMiniaturizedNotification as String:
+        case kAXWindowMiniaturizedNotification:
             logger.info("📦 Window minimized", category: .windowManager)
             // Smaller delay for minimize/restore as these are state changes, not list changes
             self.scheduleWindowListUpdate(reason: "window minimize", initialDelay: 0.05)
             
-        case kAXWindowDeminiaturizedNotification as String:
+        case kAXWindowDeminiaturizedNotification:
             logger.info("📤 Window restored", category: .windowManager)
             // Smaller delay for minimize/restore as these are state changes, not list changes
             self.scheduleWindowListUpdate(reason: "window restore", initialDelay: 0.05)
@@ -678,8 +678,8 @@ class NativeDesktopBridge: ObservableObject {
         
         // First activate the application
         if let app = getAppForWindow(windowID: windowID) {
-            logger.info("Activating app: \(app.localizedName)", category: .focusSwitching)
-            app.activate(options: .activateIgnoringOtherApps)
+            logger.info("Activating app: \(app.localizedName ?? "Unknown")", category: .focusSwitching)
+            app.activate()
         }
         
         // Then raise the specific window
@@ -722,7 +722,7 @@ class NativeDesktopBridge: ObservableObject {
         
         var error: NSDictionary?
         if let scriptObject = NSAppleScript(source: script) {
-            let result = scriptObject.executeAndReturnError(&error)
+            let _ = scriptObject.executeAndReturnError(&error)
             let success = (error == nil)
             logger.debug("🔧 AppleScript result: \(success ? "SUCCESS" : "FAILED")", category: .focusSwitching)
             if let error = error {
