@@ -666,8 +666,8 @@ class NativeDesktopBridge: ObservableObject {
             return .permissionDenied
         }
         
-        // Try AppleScript first - more robust for stubborn apps like Xcode
-        if activateWindowWithAppleScript(windowID: windowID) {
+        // Try Core Graphics first - more robust for stubborn apps like Xcode
+        if activateWindowWithCoreGraphics(windowID: windowID) {
             return .success
         }
         
@@ -692,46 +692,125 @@ class NativeDesktopBridge: ObservableObject {
         }
     }
     
-    private func activateWindowWithAppleScript(windowID: CGWindowID) -> Bool {
-        logger.debug("🔧 Trying AppleScript activation for window ID: \(windowID)", category: .focusSwitching)
+    // MARK: - Private Core Graphics APIs (Amethyst approach)
+    
+    // swiftlint:disable identifier_name
+    private let kCPSUserGenerated: UInt32 = 0x200
+    // swiftlint:enable identifier_name
+    
+    // Dynamic loading of private APIs
+    private func loadPrivateAPIs() -> (getProcessForPID: ((pid_t, inout ProcessSerialNumber) -> OSStatus)?, setFrontProcess: ((inout ProcessSerialNumber, UInt32, UInt32) -> CGError)?, postEventRecord: ((inout ProcessSerialNumber, inout UInt8) -> CGError)?) {
+        guard let coreGraphicsHandle = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_NOW) else {
+            logger.debug("🔧 Failed to load CoreGraphics framework", category: .focusSwitching)
+            return (nil, nil, nil)
+        }
         
-        guard let app = getAppForWindow(windowID: windowID),
-              let appName = app.localizedName else {
+        guard let applicationServicesHandle = dlopen("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices", RTLD_NOW) else {
+            logger.debug("🔧 Failed to load ApplicationServices framework", category: .focusSwitching)
+            return (nil, nil, nil)
+        }
+        
+        let getProcessForPIDPtr = dlsym(applicationServicesHandle, "GetProcessForPID")
+        let setFrontProcessPtr = dlsym(coreGraphicsHandle, "_SLPSSetFrontProcessWithOptions")
+        let postEventRecordPtr = dlsym(coreGraphicsHandle, "SLPSPostEventRecordTo")
+        
+        let getProcessForPID: ((pid_t, inout ProcessSerialNumber) -> OSStatus)?
+        let setFrontProcess: ((inout ProcessSerialNumber, UInt32, UInt32) -> CGError)?
+        let postEventRecord: ((inout ProcessSerialNumber, inout UInt8) -> CGError)?
+        
+        if let getProcessForPIDPtr = getProcessForPIDPtr {
+            getProcessForPID = { pid, psn in
+                let fn = unsafeBitCast(getProcessForPIDPtr, to: (@convention(c) (pid_t, UnsafeMutablePointer<ProcessSerialNumber>) -> OSStatus).self)
+                return withUnsafeMutablePointer(to: &psn) { ptr in
+                    fn(pid, ptr)
+                }
+            }
+        } else {
+            getProcessForPID = nil
+        }
+        
+        if let setFrontProcessPtr = setFrontProcessPtr {
+            setFrontProcess = { psn, wid, mode in
+                let fn = unsafeBitCast(setFrontProcessPtr, to: (@convention(c) (UnsafeMutablePointer<ProcessSerialNumber>, UInt32, UInt32) -> CGError).self)
+                return withUnsafeMutablePointer(to: &psn) { ptr in
+                    fn(ptr, wid, mode)
+                }
+            }
+        } else {
+            setFrontProcess = nil
+        }
+        
+        if let postEventRecordPtr = postEventRecordPtr {
+            postEventRecord = { psn, bytes in
+                let fn = unsafeBitCast(postEventRecordPtr, to: (@convention(c) (UnsafeMutablePointer<ProcessSerialNumber>, UnsafeMutablePointer<UInt8>) -> CGError).self)
+                return withUnsafeMutablePointer(to: &psn) { psnPtr in
+                    withUnsafeMutablePointer(to: &bytes) { bytesPtr in
+                        fn(psnPtr, bytesPtr)
+                    }
+                }
+            }
+        } else {
+            postEventRecord = nil
+        }
+        
+        return (getProcessForPID, setFrontProcess, postEventRecord)
+    }
+    
+    private func activateWindowWithCoreGraphics(windowID: CGWindowID) -> Bool {
+        logger.debug("🔧 Trying Amethyst-style activation for window ID: \(windowID)", category: .focusSwitching)
+        
+        guard let app = getAppForWindow(windowID: windowID) else {
+            logger.debug("🔧 Could not get app for window ID: \(windowID)", category: .focusSwitching)
             return false
         }
         
-        // Get window title if available
-        let windowTitle = getWindowTitle(windowID: windowID)
+        let pid = app.processIdentifier
+        var wid = UInt32(windowID)
+        var psn = ProcessSerialNumber()
         
-        let script: String
-        if let title = windowTitle, !title.isEmpty {
-            // Try to activate specific window by title
-            script = """
-            tell application "\(appName)"
-                activate
-                try
-                    set frontmost to true
-                    tell window "\(title)" to set index to 1
-                end try
-            end tell
-            """
-        } else {
-            // Just activate the app if no window title
-            script = "tell application \"\(appName)\" to activate"
+        // Step 1: Load private APIs dynamically
+        let (getProcessForPID, setFrontProcess, postEventRecord) = loadPrivateAPIs()
+        
+        guard let getProcessForPID = getProcessForPID, let setFrontProcess = setFrontProcess, let postEventRecord = postEventRecord else {
+            logger.debug("🔧 Failed to load private APIs", category: .focusSwitching)
+            return false
         }
         
-        var error: NSDictionary?
-        if let scriptObject = NSAppleScript(source: script) {
-            let _ = scriptObject.executeAndReturnError(&error)
-            let success = (error == nil)
-            logger.debug("🔧 AppleScript result: \(success ? "SUCCESS" : "FAILED")", category: .focusSwitching)
-            if let error = error {
-                logger.debug("🔧 AppleScript error: \(error)", category: .focusSwitching)
+        // Step 2: Get process serial number for the PID
+        let processStatus = getProcessForPID(pid, &psn)
+        guard processStatus == noErr else {
+            logger.debug("🔧 GetProcessForPID failed with status: \(processStatus)", category: .focusSwitching)
+            return false
+        }
+        
+        // Step 4: Set front process with specific window ID
+        var cgStatus = setFrontProcess(&psn, wid, kCPSUserGenerated)
+        guard cgStatus == .success else {
+            logger.debug("🔧 _SLPSSetFrontProcessWithOptions failed with status: \(cgStatus)", category: .focusSwitching)
+            return false
+        }
+        
+        // Step 5: Post additional event records for proper window activation
+        for byte in [0x01, 0x02] {
+            var bytes = [UInt8](repeating: 0, count: 0xf8)
+            bytes[0x04] = 0xF8
+            bytes[0x08] = UInt8(byte)
+            bytes[0x3a] = 0x10
+            memcpy(&bytes[0x3c], &wid, MemoryLayout<UInt32>.size)
+            memset(&bytes[0x20], 0xFF, 0x10)
+            
+            cgStatus = bytes.withUnsafeMutableBufferPointer { pointer in
+                return postEventRecord(&psn, &pointer.baseAddress!.pointee)
             }
-            return success
+            
+            guard cgStatus == .success else {
+                logger.debug("🔧 SLPSPostEventRecordTo failed with status: \(cgStatus) for byte: \(byte)", category: .focusSwitching)
+                return false
+            }
         }
         
-        return false
+        logger.debug("🔧 Amethyst-style activation SUCCESS for window ID: \(windowID)", category: .focusSwitching)
+        return true
     }
     
     func minimizeWindow(windowID: CGWindowID) -> WindowMoveResult {
