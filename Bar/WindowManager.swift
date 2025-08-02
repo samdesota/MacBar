@@ -21,6 +21,40 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
     private var taskbarY: CGFloat = 0
     private let logger = Logger.shared
     
+    // Window cache to avoid duplicate bridge calls
+    private struct WindowCache {
+        let windows: [NativeDesktopBridge.NativeWindowInfo]
+        let timestamp: Date
+        
+        func isValid(maxAge: TimeInterval = 0.064) -> Bool {
+            return Date().timeIntervalSince(timestamp) < maxAge
+        }
+    }
+    private var windowCache: WindowCache?
+    
+    // Cache management methods
+    private func getCachedWindows() -> [NativeDesktopBridge.NativeWindowInfo]? {
+        if let cache = windowCache, cache.isValid() {
+            return cache.windows
+        }
+        return nil
+    }
+    
+    private func updateCache(windows: [NativeDesktopBridge.NativeWindowInfo]) {
+        windowCache = WindowCache(windows: windows, timestamp: Date())
+    }
+    
+    /// Gets visible windows from cache if valid, otherwise fetches fresh data and updates cache
+    private func getVisibleWindowsWithCache() -> [NativeDesktopBridge.NativeWindowInfo] {
+        if let cachedWindows = getCachedWindows() {
+            return cachedWindows
+        } else {
+            let freshWindows = nativeBridge.getVisibleApplicationWindows()
+            updateCache(windows: freshWindows)
+            return freshWindows
+        }
+    }
+    
     // Native desktop bridge for all low-level windowing operations
     private let nativeBridge = NativeDesktopBridge()
     
@@ -83,7 +117,7 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
         updateWindowList()
         
         // Set up timer for periodic updates (safety net only - window observers handle real-time updates)
-        timer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             self?.checkAccessibilityPermission()
             self?.updateWindowList() // Full window list refresh every 5 minutes as safety net
             self?.preventTaskbarOverlap()
@@ -122,16 +156,22 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
     
     func onWindowListChanged() {
         logger.info("📋 Window list changed", category: .windowManager)
+        // Invalidate cache since window list changed
+        windowCache = nil
         updateWindowList()
     }
     
     func onAppLaunched(app: NSRunningApplication) {
         logger.info("🚀 Detected app launch: \(app.localizedName ?? "Unknown")", category: .windowManager)
+        // Invalidate cache since app launch may change window list
+        windowCache = nil
         // Window list will be updated via onWindowListChanged()
     }
     
     func onAppTerminated(app: NSRunningApplication) {
         logger.info("🛑 Detected app termination: \(app.localizedName ?? "Unknown")", category: .windowManager)
+        // Invalidate cache since app termination may change window list
+        windowCache = nil
         // Window list will be updated via onWindowListChanged()
     }
     
@@ -226,7 +266,8 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
         // Update taskbar position in case screen changed
         setupTaskbarPosition()
         
-        let allWindows = nativeBridge.getAllWindows(includeOffscreen: false)
+        // Get visible windows from bridge (or cache) - same as getVisibleWindows()
+        let allWindows = getVisibleWindowsWithCache()
         
         logger.debug("Checking \(allWindows.count) windows for overlap", category: .windowPositioning)
         
@@ -283,8 +324,8 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
         var windowInfos: [WindowInfo] = []
         var newWindowOrder: [CGWindowID] = []
         
-        // Get all visible application windows from bridge
-        let nativeWindows = nativeBridge.getVisibleApplicationWindows()
+        // Get all visible application windows from bridge (or cache)
+        let nativeWindows = getVisibleWindowsWithCache()
         
         logger.debug("Total windows found: \(nativeWindows.count)", category: .windowManager)
         
