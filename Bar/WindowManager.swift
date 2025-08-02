@@ -357,11 +357,18 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
         
         // Apply order stabilization to maintain consistent window ordering
         let orderedWindows = maintainStableOrderByWindow(currentWindows: windowInfos, newOrder: newWindowOrder)
-        
+
         // Update display names based on whether there are multiple windows per app
         let currentSpaceWindows = updateDisplayNamesForMultipleWindows(orderedWindows)
-        
+
+        let activeSpaceId = self.currentActiveSpaceID
+
         DispatchQueue.main.async {
+            if activeSpaceId != self.currentActiveSpaceID {
+                self.logger.info("🎨 Skipping update for space \(self.currentActiveSpaceID) because it's not the active space", category: .windowManager)
+                return
+            }
+
             self.logger.info("🎨 Updating space \(self.currentActiveSpaceID) windows: \(currentSpaceWindows.count) windows using space-specific API", category: .windowManager)
             
             // Only update the windows for the current active space, leave other spaces alone
@@ -498,6 +505,10 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
         
         // First, add existing windows in their current order (from current space)
         let existingWindows = spaceWindows[currentActiveSpaceID] ?? []
+        
+        logger.info("🔄 Maintaining stable order for \(existingWindows.count) existing windows and \(newOrder.count) new windows", category: .windowManager)
+
+
         for window in existingWindows {
             if let newWindow = currentWindows.first(where: { $0.id == window.id }) {
                 orderedWindows.append(newWindow)
