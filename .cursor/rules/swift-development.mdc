@@ -1,0 +1,46 @@
+---
+description: Swift/Xcode development guidelines and build instructions
+globs: ["*.swift", "*.xcodeproj/**/*", "*.xcworkspace/**/*"]
+alwaysApply: true
+---
+
+# Swift/Xcode Project Development Guide
+
+This is a Swift macOS application project built with Xcode. When working on this project:
+
+## Building the Project
+
+**Always use xcodebuild for building when developing:**
+```bash
+xcodebuild -project Bar.xcodeproj -scheme Bar -configuration Debug build
+```
+
+This build command is essential because:
+- It generates index data for SourceKit-LSP via "indexing while building"
+- Updates the global index that Swift LSP uses for code completion and navigation
+- Ensures local classes (like `Logger`) are properly recognized in the IDE
+
+## Project Configuration
+
+- **Build Server**: This project uses `xcode-build-server` to bridge Xcode projects with SourceKit-LSP
+- **Index Path**: Build artifacts and index data are stored in `~/Library/Developer/Xcode/DerivedData/`
+- **LSP Configuration**: The project has `.vscode/settings.json` configured for proper Swift LSP integration
+
+## Development Workflow
+
+1. **After making significant changes**: Rebuild the project to update the index
+2. **If LSP stops recognizing classes**: Run the build command above
+3. **When adding new files**: Consider rebuilding to ensure proper indexing
+
+## Architecture Notes
+
+- This is a macOS utility app for window management
+- Uses Accessibility APIs for window control
+- Built with SwiftUI for the interface
+
+## Common Issues
+
+- **"Cannot find 'ClassName' in scope"**: Usually resolved by rebuilding the project
+- **LSP not working**: Ensure `xcode-build-server` is installed and `buildServer.json` exists
+
+Always rebuild the project when in doubt - the indexing system depends on it!
