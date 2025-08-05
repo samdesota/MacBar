@@ -116,47 +116,6 @@ struct TaskbarView: View {
             )
             .frame(height: 42)
             
-            // Debug overlay
-            VStack {
-                // Debug info showing space ID and window count
-                HStack {
-                    Text("Taskbar: \(currentSpaceID)")
-                        .font(.caption2)
-                        .fontWeight(.bold)
-                        .foregroundColor(.blue)
-                    
-                    Text("Windows: \(windowManager.getWindowsForSpace(spaceIDToUInt64(spaceID)).count)/\(windowManager.spaceWindows.values.flatMap { $0 }.count)")
-                        .font(.caption2)
-                        .foregroundColor(.green)
-                    
-                    // Show window IDs for debugging
-                    Text("App IDs: \(windowManager.getWindowsForSpace(spaceIDToUInt64(spaceID)).prefix(3).map { String($0.id) }.joined(separator: ", "))")
-                        .font(.caption2)
-                        .foregroundColor(.purple)
-                        .lineLimit(1)
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 2)
-                .background(Color.black.opacity(0.1))
-                .cornerRadius(4)
-                
-                Spacer()
-                
-                if !windowManager.hasAccessibilityPermission {
-                    HStack {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundColor(.orange)
-                        Text("Accessibility permission required")
-                            .font(.caption)
-                            .foregroundColor(.orange)
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.orange.opacity(0.2))
-                    .cornerRadius(4)
-                }
-            }
-            
             // Logging controls overlay
             if showLogControls {
                 VStack {
