@@ -14,6 +14,7 @@ class Logger: ObservableObject {
     enum LogCategory: String, CaseIterable {
         case windowManager = "WindowManager"
         case windowPositioning = "WindowPositioning"
+        case windowTiling = "WindowTiling"
         case accessibility = "Accessibility"
         case temporary = "Temporary"
         case taskbar = "Taskbar"

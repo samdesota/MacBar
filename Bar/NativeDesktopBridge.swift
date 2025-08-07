@@ -1178,4 +1178,41 @@ class NativeDesktopBridge: ObservableObject {
         default: return "Unknown Error (\(error.rawValue))"
         }
     }
+    
+    // MARK: - Mission Control Detection
+    
+    /// Detect if Mission Control is currently active by counting Dock windows (>3 indicates Mission Control)
+    func maybeMissionControlIsActive() -> Bool {
+        guard let windowInfosRef = CGWindowListCopyWindowInfo(.optionOnScreenOnly, CGWindowID(0)) else {
+            return false
+        }
+        
+        let windowList = windowInfosRef as NSArray
+        var dockWindowCount = 0
+        
+        for entry in windowList {
+            guard let entryDict = entry as? NSDictionary,
+                  let ownerName = entryDict["kCGWindowOwnerName"] as? String,
+                  ownerName == "Dock" else {
+                continue
+            }
+            
+            dockWindowCount += 1
+            
+            // Log dock window for debugging
+            if let bounds = entryDict["kCGWindowBounds"] as? NSDictionary,
+               let yPosition = bounds["Y"] as? NSNumber {
+                logger.debug("Dock window #\(dockWindowCount): Y=\(yPosition.intValue)", category: .nativeBridge)
+            }
+        }
+        
+        let isMissionControlActive = dockWindowCount > 3
+        if isMissionControlActive {
+            logger.debug("Mission Control detected: \(dockWindowCount) Dock windows (>3)", category: .nativeBridge)
+        } else {
+            logger.debug("Mission Control not active: \(dockWindowCount) Dock windows (≤3)", category: .nativeBridge)
+        }
+        
+        return isMissionControlActive
+    }
 }

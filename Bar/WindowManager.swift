@@ -104,10 +104,17 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
     // Native desktop bridge for all low-level windowing operations
     private let nativeBridge = NativeDesktopBridge()
     
+    // Window tiling manager
+    private var windowTiling: WindowTiling?
+    
     init() {
         let instanceID = UUID().uuidString.prefix(8)
         logger.info("🏗️ WindowManager initialized [\(instanceID)]", category: .windowManager)
         nativeBridge.delegate = self
+        
+        // Initialize window tiling after bridge is set up
+        windowTiling = WindowTiling(nativeBridge: nativeBridge)
+        
         checkAccessibilityPermission()
         startMonitoring()
         setupTaskbarPosition()
@@ -178,7 +185,8 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
             guard let self = self else { return }
             self.checkAccessibilityPermission()
             self.updateWindowList() // Full window list refresh every 10 seconds as safety net
-            self.preventTaskbarOverlap()
+            self.windowTiling?.preventTaskbarOverlap() // Now handled by WindowTiling
+            self.windowTiling?.clearOldRestrictions() // Clean up old size restriction records
         }
         
         // Refresh observers after a delay to ensure everything is set up properly
@@ -217,6 +225,28 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
     
     func getWindowsForSpace(_ spaceID: UInt64) -> [WindowInfo] {
         return spaceWindows[spaceID] ?? []
+    }
+    
+    // MARK: - Window Tiling Interface
+    
+    /// Get all size-restricted windows for debugging/UI purposes
+    func getSizeRestrictedWindows() -> [WindowTiling.SizeRestriction] {
+        return windowTiling?.getAllSizeRestrictedWindows() ?? []
+    }
+    
+    /// Check if a specific window is size-restricted
+    func isWindowSizeRestricted(_ windowID: CGWindowID) -> Bool {
+        return windowTiling?.isWindowSizeRestricted(windowID) ?? false
+    }
+    
+    /// Configure window padding (distance from screen edges)
+    func setWindowPadding(_ padding: CGFloat) {
+        windowTiling?.setWindowPadding(padding)
+    }
+    
+    /// Get current window padding value
+    func getWindowPadding() -> CGFloat {
+        return windowTiling?.getWindowPadding() ?? 5
     }
     
 
@@ -355,6 +385,24 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
             }
         }
         
+        // Detect new windows for tiling (before order stabilization)
+        let existingWindowIDs = Set((spaceWindows[currentActiveSpaceID] ?? []).map { $0.id })
+        let currentWindowIDs = Set(nativeWindows.map { $0.windowID })
+        let newWindows = nativeWindows.filter { !existingWindowIDs.contains($0.windowID) }
+        let removedWindowIDs = existingWindowIDs.subtracting(currentWindowIDs)
+        
+        // Clean up tiling tracking for removed windows
+        for removedWindowID in removedWindowIDs {
+            logger.debug("🗑️ Removing window \(removedWindowID) from tiling tracking", category: .windowManager)
+            windowTiling?.removeWindowFromTracking(removedWindowID)
+        }
+        
+        // Trigger tiling for new windows
+        for newWindow in newWindows {
+            logger.info("🆕 Detected new window for tiling: \(newWindow.owner) - \(newWindow.name)", category: .windowManager)
+            windowTiling?.handleNewWindow(windowID: newWindow.windowID, windowInfo: newWindow)
+        }
+        
         // Apply order stabilization to maintain consistent window ordering
         let orderedWindows = maintainStableOrderByWindow(currentWindows: windowInfos, newOrder: newWindowOrder)
 
@@ -387,61 +435,6 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
             }
             
             self.logger.info("✅ Window list update completed for space \(self.currentActiveSpaceID)", category: .windowManager)
-        }
-    }
-    
-    func preventTaskbarOverlap() {
-        guard hasAccessibilityPermission else { 
-            logger.debug("Skipping overlap prevention - no accessibility permission", category: .windowPositioning)
-            return 
-        }
-        
-        // Update taskbar position in case screen changed
-        setupTaskbarPosition()
-        
-        // Get visible windows from bridge (or cache) - same as getVisibleWindows()
-        let allWindows = getVisibleWindowsWithCache()
-        
-        logger.debug("Checking \(allWindows.count) windows for overlap", category: .windowPositioning)
-        
-        for window in allWindows {
-            // Skip our own app and system windows
-            let systemApps = ["Bar", "Dock", "SystemUIServer", "ControlCenter", "NotificationCenter"]
-            if systemApps.contains(window.owner) {
-                continue
-            }
-            
-            // Check if window overlaps with taskbar
-            let windowBottom = window.bounds.minY
-            let windowTop = window.bounds.maxY
-            let taskbarTop = taskbarY + taskbarHeight
-            
-            logger.debug("Window \(window.owner): Y=\(window.bounds.minY), H=\(window.bounds.height), Bottom=\(windowBottom), Top=\(windowTop), TaskbarY=\(taskbarY), TaskbarTop=\(taskbarTop)", category: .windowPositioning)
-            
-            // Check if window overlaps with taskbar area
-            if windowBottom < taskbarTop && windowTop > taskbarY {
-                logger.info("Window \(window.owner) overlaps taskbar - adjusting position", category: .windowPositioning)
-                
-                // Calculate new height to avoid taskbar overlap
-                let newHeight = taskbarY - window.bounds.minY - 5
-                let minHeight: CGFloat = 200
-                let finalHeight = max(newHeight, minHeight)
-                
-                // Resize window using bridge
-                let newSize = CGSize(width: window.bounds.width, height: finalHeight)
-                let result = nativeBridge.resizeWindow(windowID: window.windowID, to: newSize)
-                
-                switch result {
-                case .success:
-                    logger.info("Successfully resized window \(window.owner) to avoid taskbar overlap", category: .windowPositioning)
-                case .failed(let error):
-                    logger.warning("Failed to resize window \(window.owner): \(error)", category: .windowPositioning)
-                case .permissionDenied:
-                    logger.warning("Permission denied for resizing window \(window.owner)", category: .windowPositioning)
-                case .windowNotFound:
-                    logger.warning("Window not found for resizing: \(window.owner)", category: .windowPositioning)
-                }
-            }
         }
     }
     
