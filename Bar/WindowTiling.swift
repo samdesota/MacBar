@@ -26,6 +26,24 @@ class WindowTiling: ObservableObject {
     // Window tiling state
     private var tiledWindows: Set<CGWindowID> = []
     
+    // Split group tracking
+    private var splitGroups: [Set<CGWindowID>] = []
+    private var windowToSplitGroup: [CGWindowID: Int] = [:]
+    
+    // Active split group focus state
+    private var activeSplitGroupIndex: Int?
+    private var hasBroughtActiveGroupToFront: Bool = false
+
+    // Rebalancing state
+    private var previousWindowBounds: [CGWindowID: CGRect] = [:]
+    private var lastAdjustedWindows: [CGWindowID: Date] = [:]
+    private let rebalanceCooldown: TimeInterval = 2.2 // seconds
+    
+    // Focus synchronization debouncing
+    private var lastFocusSyncTime: Date = Date.distantPast
+    private var lastSyncedWindowID: CGWindowID?
+    private let focusSyncCooldown: TimeInterval = 1.0  // 1 second cooldown
+    
     struct SizeRestriction {
         let windowID: CGWindowID
         let maxSize: CGSize
@@ -85,6 +103,135 @@ class WindowTiling: ObservableObject {
     func getAllSizeRestrictedWindows() -> [SizeRestriction] {
         return Array(sizeRestrictedWindows.values)
     }
+
+    /// Periodically rebalance split view windows to remove gaps created by user-initiated resizes
+    func rebalanceSplitViews() {
+        guard let bridge = nativeBridge else {
+            logger.warning("NativeBridge not available for rebalance", category: .windowTiling)
+            return
+        }
+
+        // Permission and mode checks similar to overlap prevention
+        if !bridge.checkAccessibilityPermission() { return }
+        if bridge.maybeMissionControlIsActive() { return }
+
+        // Prune old adjusted markers
+        let now = Date()
+        lastAdjustedWindows = lastAdjustedWindows.filter { now.timeIntervalSince($0.value) < rebalanceCooldown }
+
+        // Process each split group
+        for (groupIndex, idSet) in splitGroups.enumerated() {
+            let windowIDs = Array(idSet)
+            guard windowIDs.count >= 2 else { continue }
+
+            // Collect current bounds; drop windows we cannot read
+            var currentBoundsByID: [CGWindowID: CGRect] = [:]
+            for id in windowIDs {
+                if let b = bridge.getWindowBounds(windowID: id) {
+                    currentBoundsByID[id] = b
+                }
+            }
+            // If we failed to read all, continue but only with those available
+            let availableIDs = windowIDs.compactMap { currentBoundsByID[$0] != nil ? $0 : nil }
+            if availableIDs.count < 2 { continue }
+
+            // Sort windows left-to-right based on current X
+            let ordered = availableIDs.sorted { (lhs, rhs) -> Bool in
+                guard let lb = currentBoundsByID[lhs], let rb = currentBoundsByID[rhs] else { return false }
+                return lb.minX < rb.minX
+            }
+
+            // Detect user-initiated changes (size change vs previous), skipping windows we adjusted recently
+            let sizeTolerance: CGFloat = 2.0
+            var candidates: [Int] = [] // indices into ordered
+            for (idx, wid) in ordered.enumerated() {
+                guard let cur = currentBoundsByID[wid] else { continue }
+                if let prev = previousWindowBounds[wid] {
+                    let wDiff = abs(cur.width - prev.width)
+                    let hDiff = abs(cur.height - prev.height)
+                    let changedByUser = (wDiff > sizeTolerance || hDiff > sizeTolerance) && (lastAdjustedWindows[wid] == nil)
+                    if changedByUser {
+                        candidates.append(idx)
+                    }
+                } else {
+                    // No previous record; seed it but don't act this frame
+                    previousWindowBounds[wid] = cur
+                }
+            }
+
+            // If no user-changed windows detected, update previous and continue
+            if candidates.isEmpty {
+                for wid in ordered { if let cur = currentBoundsByID[wid] { previousWindowBounds[wid] = cur } }
+                continue
+            }
+
+            // For each changed window, fill the largest adjacent gap by expanding the neighbor
+            for idx in candidates {
+                let wid = ordered[idx]
+                guard let cur = currentBoundsByID[wid] else { continue }
+
+                // Determine neighbors
+                let count = ordered.count
+                let hasPrev = idx - 1 >= 0
+                let hasNext = idx + 1 < count
+                let onlyPairWrap = (count == 2)
+
+                let prevIdx: Int? = hasPrev ? idx - 1 : (onlyPairWrap ? (idx + 1) % count : nil)
+                let nextIdx: Int? = hasNext ? idx + 1 : (onlyPairWrap ? (idx + count - 1) % count : nil)
+
+                // Compute gaps (positive means space to fill). Use configured padding between windows
+                var leftGap: CGFloat = 0
+                var rightGap: CGFloat = 0
+                if let p = prevIdx, let pb = currentBoundsByID[ordered[p]] {
+                    leftGap = max(0, cur.minX - pb.maxX - windowPadding)
+                }
+                if let n = nextIdx, let nb = currentBoundsByID[ordered[n]] {
+                    rightGap = max(0, nb.minX - cur.maxX - windowPadding)
+                }
+
+                // Choose neighbor with larger gap; if equal and pair, pick the other window
+                var chooseNext = false
+                if onlyPairWrap {
+                    // Always adjust the other window in a pair
+                    chooseNext = (nextIdx != nil && ordered[nextIdx!] != wid)
+                } else {
+                    chooseNext = rightGap >= leftGap
+                }
+
+                if chooseNext, let n = nextIdx, let nb = currentBoundsByID[ordered[n]] {
+                    let gap = max(rightGap, 0)
+                    if gap > sizeTolerance {
+                        // Expand next window into the gap: move its X left by gap and increase width by gap
+                        let newOrigin = CGPoint(x: nb.minX - gap, y: nb.minY)
+                        let newSize = CGSize(width: nb.width + gap, height: nb.height)
+                        applyWindowBounds(windowID: ordered[n], bounds: CGRect(origin: newOrigin, size: newSize), windowName: "Rebalanced Next")
+                        lastAdjustedWindows[ordered[n]] = now
+                        // Update current bounds snapshot for subsequent calculations
+                        currentBoundsByID[ordered[n]] = CGRect(origin: newOrigin, size: newSize)
+                    }
+                } else if let p = prevIdx, let pb = currentBoundsByID[ordered[p]] {
+                    let gap = max(leftGap, 0)
+                    if gap > sizeTolerance {
+                        // Expand previous window to the right by the gap (keep origin)
+                        let newOrigin = CGPoint(x: pb.minX, y: pb.minY)
+                        let newSize = CGSize(width: pb.width + gap, height: pb.height)
+                        applyWindowBounds(windowID: ordered[p], bounds: CGRect(origin: newOrigin, size: newSize), windowName: "Rebalanced Prev")
+                        lastAdjustedWindows[ordered[p]] = now
+                        currentBoundsByID[ordered[p]] = CGRect(origin: newOrigin, size: newSize)
+                    }
+                }
+            }
+
+            // Store previous bounds for next frame comparison
+            for wid in ordered {
+                if let cur = currentBoundsByID[wid] {
+                    previousWindowBounds[wid] = cur
+                }
+            }
+
+            logger.debug("Rebalanced split group \(groupIndex) with \(ordered.count) window(s)", category: .windowTiling)
+        }
+    }
     
     /// Configure window padding (distance from screen edges)
     func setWindowPadding(_ padding: CGFloat) {
@@ -96,6 +243,167 @@ class WindowTiling: ObservableObject {
     /// Get current window padding value
     func getWindowPadding() -> CGFloat {
         return windowPadding
+    }
+    
+    /// Handle focus change to synchronize split windows
+    func handleWindowFocusChanged(focusedWindowID: CGWindowID?) {
+        guard let focusedWindowID = focusedWindowID else {
+            // Focus left our known windows; clear active group
+            activeSplitGroupIndex = nil
+            hasBroughtActiveGroupToFront = false
+            return
+        }
+        
+        // Determine if focused window is in a split group
+        if let groupIndex = windowToSplitGroup[focusedWindowID], groupIndex < splitGroups.count {
+            // Entering or inside a split group
+            if activeSplitGroupIndex != groupIndex {
+                // New active split group
+                activeSplitGroupIndex = groupIndex
+                hasBroughtActiveGroupToFront = false
+            }
+            
+            // Bring all in group to front only once per entry into the group
+            if hasBroughtActiveGroupToFront == false {
+                let group = splitGroups[groupIndex]
+                logger.info("🔄 Focus sync (once): bringing \(group.count) split window(s) to front", category: .windowTiling)
+                // After bringing partners forward, restore focus to the originally focused window
+                bringWindowsToFront(windowIDs: Array(group), returnFocusTo: focusedWindowID)
+                hasBroughtActiveGroupToFront = true
+            }
+            
+            // Otherwise, already brought to front; do nothing
+            return
+        } else {
+            // Focused window not in current active split group; clear state
+            if activeSplitGroupIndex != nil {
+                logger.debug("🧹 Leaving split group focus state", category: .windowTiling)
+            }
+            activeSplitGroupIndex = nil
+            hasBroughtActiveGroupToFront = false
+            return
+        }
+    }
+    
+    /// Execute vertical split layout for multiple windows
+    func executeVerticalSplit(windows: [WindowInfo]) {
+        guard !windows.isEmpty else {
+            logger.warning("Cannot execute vertical split - no windows provided", category: .windowTiling)
+            return
+        }
+        
+        logger.info("🔀 Executing vertical split layout for \(windows.count) windows", category: .windowTiling)
+        
+        // Calculate split bounds for each window
+        guard let splitBounds = calculateVerticalSplitBounds(windowCount: windows.count) else {
+            logger.warning("Cannot calculate split bounds", category: .windowTiling)
+            return
+        }
+        
+        // Create split group and track windows
+        let windowIDs = Set(windows.map { $0.id })
+        let groupIndex = splitGroups.count
+        splitGroups.append(windowIDs)
+        
+        // Map each window to its split group
+        for windowID in windowIDs {
+            windowToSplitGroup[windowID] = groupIndex
+        }
+        
+        logger.info("📝 Created split group \(groupIndex) with \(windowIDs.count) windows", category: .windowTiling)
+        
+        // Apply the split layout to each window
+        for (index, window) in windows.enumerated() {
+            let bounds = splitBounds[index]
+            logger.info("🔀 Positioning window \(window.displayName) at split \(index + 1): \(bounds)", category: .windowTiling)
+            
+            applyWindowBounds(windowID: window.id, bounds: bounds, windowName: window.displayName)
+        }
+        
+        // Bring all split windows to the front with a small delay to avoid conflicts
+        // Preserve current focused window by restoring focus at the end
+        let currentFocused = nativeBridge?.getFocusedWindowID()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.bringWindowsToFront(windowIDs: Array(windowIDs), returnFocusTo: currentFocused)
+        }
+        
+        logger.info("✅ Vertical split layout completed for \(windows.count) windows", category: .windowTiling)
+    }
+
+    /// Remove a window from its current split group. If the group would have only one window left
+    /// and dissolveIfPair is true, dissolve the entire group (removing the last remaining member as well).
+    @discardableResult
+    func removeWindowFromSplit(windowID: CGWindowID, dissolveIfPair: Bool = true) -> Bool {
+        guard let groupIndex = windowToSplitGroup[windowID], groupIndex < splitGroups.count else {
+            logger.debug("removeWindowFromSplit: window not in any split group: \(windowID)", category: .windowTiling)
+            return false
+        }
+
+        var group = splitGroups[groupIndex]
+        let originalCount = group.count
+        group.remove(windowID)
+        windowToSplitGroup.removeValue(forKey: windowID)
+
+        if dissolveIfPair && group.count <= 1 {
+            // Dissolve the entire group
+            logger.info("🧨 Dissolving split group \(groupIndex) after removing window \(windowID)", category: .windowTiling)
+            // Remove mapping for the last remaining member too
+            for remaining in group { windowToSplitGroup.removeValue(forKey: remaining) }
+            splitGroups.remove(at: groupIndex)
+
+            // Adjust active group index bookkeeping
+            if activeSplitGroupIndex == groupIndex {
+                activeSplitGroupIndex = nil
+                hasBroughtActiveGroupToFront = false
+            } else if let active = activeSplitGroupIndex, groupIndex < active {
+                activeSplitGroupIndex = active - 1
+            }
+
+            // Rebuild mapping for remaining groups
+            windowToSplitGroup = [:]
+            for (newIndex, ids) in splitGroups.enumerated() {
+                for id in ids { windowToSplitGroup[id] = newIndex }
+            }
+            
+            // Retile removed window and the last remaining window back to fullscreen
+            retileWindowToFullscreen(windowID: windowID)
+            if let lastRemaining = group.first {
+                retileWindowToFullscreen(windowID: lastRemaining)
+            }
+            return true
+        } else {
+            // Update group with the removal
+            splitGroups[groupIndex] = group
+            logger.info("➖ Removed window \(windowID) from split group \(groupIndex) (now \(group.count)/\(originalCount))", category: .windowTiling)
+            
+            // Retile only the removed window back to fullscreen
+            retileWindowToFullscreen(windowID: windowID)
+            return true
+        }
+    }
+
+    // Retile a window back to fullscreen area respecting taskbar/padding
+    private func retileWindowToFullscreen(windowID: CGWindowID) {
+        guard let targetBounds = calculateFullscreenBounds() else {
+            logger.warning("Cannot retile window to fullscreen - no target bounds", category: .windowTiling)
+            return
+        }
+        
+        guard let bridge = nativeBridge else {
+            logger.warning("NativeBridge not available for retile", category: .windowTiling)
+            return
+        }
+        
+        // Try to fetch window info for richer tiling (restriction handling)
+        let all = bridge.getAllWindows(includeOffscreen: false)
+        if let info = all.first(where: { $0.windowID == windowID }) {
+            attemptFullscreenTiling(windowID: windowID, targetBounds: targetBounds, windowInfo: info)
+            return
+        }
+        
+        // Fallback: move/resize directly if window info not found
+        logger.debug("Fallback retile (no info) for window \(windowID) to \(targetBounds)", category: .windowTiling)
+        applyWindowBounds(windowID: windowID, bounds: targetBounds, windowName: "Window \(windowID)")
     }
     
     /// Prevent all windows from overlapping with the taskbar (safety net)
@@ -193,6 +501,123 @@ class WindowTiling: ObservableObject {
         }
         
         return false
+    }
+    
+    private func calculateVerticalSplitBounds(windowCount: Int) -> [CGRect]? {
+        guard windowCount > 0 else { return nil }
+        
+        guard let screen = NSScreen.main else {
+            logger.warning("Cannot get main screen for split bounds calculation", category: .windowTiling)
+            return nil
+        }
+        
+        // Use same screen calculation as fullscreen
+        let fullScreenFrame = screen.frame
+        let visibleFrame = screen.visibleFrame
+        let menuBarHeight = fullScreenFrame.maxY - visibleFrame.maxY
+        let taskbarY = fullScreenFrame.maxY - 5
+        
+        // Calculate available area
+        let availableTop = fullScreenFrame.minY + menuBarHeight + windowPadding
+        let availableBottom = taskbarY - taskbarHeight - windowPadding
+        let availableHeight = availableBottom - availableTop
+        let availableWidth = fullScreenFrame.width - (windowPadding * 2)
+        
+        // Calculate width per window (including padding between windows)
+        let totalPaddingBetweenWindows = CGFloat(windowCount - 1) * windowPadding
+        let widthPerWindow = (availableWidth - totalPaddingBetweenWindows) / CGFloat(windowCount)
+        
+        var splitBounds: [CGRect] = []
+        
+        for i in 0..<windowCount {
+            let xOffset = fullScreenFrame.minX + windowPadding + (CGFloat(i) * (widthPerWindow + windowPadding))
+            
+            let bounds = CGRect(
+                x: xOffset,
+                y: availableTop,
+                width: widthPerWindow,
+                height: availableHeight
+            )
+            
+            splitBounds.append(bounds)
+        }
+        
+        logger.debug("Calculated \(windowCount) vertical split bounds with \(windowPadding)px padding", category: .windowTiling)
+        logger.debug("Width per window: \(widthPerWindow), total height: \(availableHeight)", category: .windowTiling)
+        
+        return splitBounds
+    }
+    
+    private func bringWindowsToFront(windowIDs: [CGWindowID], returnFocusTo: CGWindowID? = nil) {
+        guard let bridge = nativeBridge else {
+            logger.warning("NativeBridge not available for bringing windows to front", category: .windowTiling)
+            return
+        }
+        
+        for windowID in windowIDs {
+            let activateResult = bridge.activateWindow(windowID: windowID)
+            switch activateResult {
+            case .success:
+                logger.debug("✅ Brought window \(windowID) to front", category: .windowTiling)
+            case .failed(let error):
+                logger.warning("⚠️ Failed to bring window \(windowID) to front: \(error)", category: .windowTiling)
+            case .permissionDenied:
+                logger.warning("⚠️ Permission denied for bringing window \(windowID) to front", category: .windowTiling)
+            case .windowNotFound:
+                logger.warning("⚠️ Window \(windowID) not found for bringing to front", category: .windowTiling)
+            }
+        }
+
+        // Ensure final focus returns to the intended original window
+        if let originalID = returnFocusTo {
+            let finalResult = bridge.activateWindow(windowID: originalID)
+            switch finalResult {
+            case .success:
+                logger.debug("🎯 Restored focus to original window \(originalID)", category: .windowTiling)
+            case .failed(let error):
+                logger.warning("⚠️ Failed to restore focus to original window \(originalID): \(error)", category: .windowTiling)
+            case .permissionDenied:
+                logger.warning("⚠️ Permission denied restoring focus to window \(originalID)", category: .windowTiling)
+            case .windowNotFound:
+                logger.warning("⚠️ Original window not found when restoring focus: \(originalID)", category: .windowTiling)
+            }
+        }
+    }
+    
+    private func applyWindowBounds(windowID: CGWindowID, bounds: CGRect, windowName: String) {
+        guard let bridge = nativeBridge else {
+            logger.warning("NativeBridge not available for applying window bounds", category: .windowTiling)
+            return
+        }
+        
+        // First move the window to position
+        let moveResult = bridge.moveWindow(windowID: windowID, to: bounds.origin)
+        switch moveResult {
+        case .success:
+            logger.debug("✅ Moved window \(windowName) to position \(bounds.origin)", category: .windowTiling)
+        case .failed(let error):
+            logger.warning("⚠️ Failed to move window \(windowName): \(error)", category: .windowTiling)
+            return
+        case .permissionDenied:
+            logger.warning("⚠️ Permission denied for moving window \(windowName)", category: .windowTiling)
+            return
+        case .windowNotFound:
+            logger.warning("⚠️ Window not found for moving: \(windowName)", category: .windowTiling)
+            return
+        }
+        
+        // Then resize the window
+        let resizeResult = bridge.resizeWindow(windowID: windowID, to: bounds.size)
+        switch resizeResult {
+        case .success:
+            logger.debug("✅ Resized window \(windowName) to size \(bounds.size)", category: .windowTiling)
+        case .failed(let error):
+            logger.warning("⚠️ Failed to resize window \(windowName): \(error)", category: .windowTiling)
+        case .permissionDenied:
+            logger.warning("⚠️ Permission denied for resizing window \(windowName)", category: .windowTiling)
+        case .windowNotFound:
+            logger.warning("⚠️ Window not found for resizing: \(windowName)", category: .windowTiling)
+        }
     }
     
     private func calculateFullscreenBounds() -> CGRect? {
@@ -425,6 +850,50 @@ class WindowTiling: ObservableObject {
         
         if !oldWindowIDs.isEmpty {
             logger.info("Cleaned up \(oldWindowIDs.count) old size restriction records", category: .windowTiling)
+        }
+    }
+    
+    /// Remove windows from split groups when they're no longer available
+    func cleanupSplitGroups(availableWindowIDs: Set<CGWindowID>) {
+        var groupsToRemove: [Int] = []
+        
+        for (groupIndex, windowIDs) in splitGroups.enumerated() {
+            let remainingWindows = windowIDs.intersection(availableWindowIDs)
+            
+            if remainingWindows.count < 2 {
+                // If less than 2 windows remain, remove the split group
+                groupsToRemove.append(groupIndex)
+                for windowID in windowIDs {
+                    windowToSplitGroup.removeValue(forKey: windowID)
+                }
+                logger.info("🗑️ Removed split group \(groupIndex) - insufficient windows remaining", category: .windowTiling)
+            } else if remainingWindows.count < windowIDs.count {
+                // Some windows were removed, update the group
+                splitGroups[groupIndex] = remainingWindows
+                logger.info("📝 Updated split group \(groupIndex) - removed \(windowIDs.count - remainingWindows.count) windows", category: .windowTiling)
+            }
+        }
+        
+        // Remove groups in reverse order to maintain indices
+        for groupIndex in groupsToRemove.reversed() {
+            splitGroups.remove(at: groupIndex)
+            
+            // If we removed the active group, clear focus state
+            if activeSplitGroupIndex == groupIndex {
+                activeSplitGroupIndex = nil
+                hasBroughtActiveGroupToFront = false
+            } else if let active = activeSplitGroupIndex, groupIndex < active {
+                // Adjust active index if groups shifted down
+                activeSplitGroupIndex = active - 1
+            }
+            
+            // Update windowToSplitGroup mappings for remaining groups
+            windowToSplitGroup = [:]
+            for (newIndex, windowIDs) in splitGroups.enumerated() {
+                for windowID in windowIDs {
+                    windowToSplitGroup[windowID] = newIndex
+                }
+            }
         }
     }
 }

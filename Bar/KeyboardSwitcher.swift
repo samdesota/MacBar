@@ -17,6 +17,13 @@ class KeyboardSwitcher: ObservableObject {
     @Published var availableWindows: [WindowInfo] = []
     @Published var lastError: String?
     
+    // Split selection mode
+    @Published var isSplitSelectionMode: Bool = false
+    @Published var selectedWindowsForSplit: [WindowInfo] = []
+    
+    // Close mode
+    @Published var isCloseMode: Bool = false
+    
     private let logger = Logger.shared
     private let permissionManager = KeyboardPermissionManager.shared
     private let keyAssignmentManager = KeyAssignmentManager.shared
@@ -295,6 +302,10 @@ class KeyboardSwitcher: ObservableObject {
         stopSwitchingModeKeyMonitoring()
         destroyEventTap()
         
+        // Clear split selection mode and close mode
+        clearSplitSelectionMode()
+        clearCloseMode()
+        
         DispatchQueue.main.async {
             self.isSwitchingMode = false
         }
@@ -312,6 +323,135 @@ class KeyboardSwitcher: ObservableObject {
         }
         
         logger.debug("Switching mode timer set for \(switchingModeTimeout) seconds", category: .keyboardSwitching)
+    }
+    
+    // MARK: - Split Selection Mode
+    
+    /// Enter split selection mode (triggered by '/' key)
+    private func enterSplitSelectionMode() {
+        guard isSwitchingMode && !isSplitSelectionMode else { return }
+        
+        logger.info("🔀 ENTERING SPLIT SELECTION MODE", category: .keyboardSwitching)
+        
+        DispatchQueue.main.async {
+            self.isSplitSelectionMode = true
+            self.selectedWindowsForSplit = []
+            self.lastError = nil
+        }
+        
+        // Reset timer to give more time for selection
+        resetSwitchingModeTimer()
+    }
+    
+    /// Clear split selection mode
+    private func clearSplitSelectionMode() {
+        guard isSplitSelectionMode else { return }
+        
+        logger.info("🔀 CLEARING SPLIT SELECTION MODE", category: .keyboardSwitching)
+        
+        DispatchQueue.main.async {
+            self.isSplitSelectionMode = false
+            self.selectedWindowsForSplit = []
+        }
+    }
+    
+    /// Add window to split selection
+    private func addWindowToSplitSelection(_ window: WindowInfo) {
+        guard isSplitSelectionMode else { return }
+        
+        // Check if window is already selected
+        if selectedWindowsForSplit.contains(where: { $0.id == window.id }) {
+            logger.debug("Window \(window.displayName) already selected for split", category: .keyboardSwitching)
+            return
+        }
+        
+        logger.info("➕ Added window to split selection: \(window.displayName) (\(window.owner))", category: .keyboardSwitching)
+        
+        DispatchQueue.main.async {
+            self.selectedWindowsForSplit.append(window)
+        }
+        
+        // Reset timer to give more time for additional selections
+        resetSwitchingModeTimer()
+    }
+    
+    /// Execute split layout with selected windows
+    private func executeSplitLayout() {
+        guard isSplitSelectionMode && !selectedWindowsForSplit.isEmpty else {
+            logger.warning("Cannot execute split layout - no windows selected", category: .keyboardSwitching)
+            return
+        }
+        
+        logger.info("🔀 EXECUTING SPLIT LAYOUT with \(selectedWindowsForSplit.count) windows", category: .keyboardSwitching)
+        
+        // Log selected windows
+        for (index, window) in selectedWindowsForSplit.enumerated() {
+            logger.info("  \(index + 1). \(window.displayName) (\(window.owner))", category: .keyboardSwitching)
+        }
+        
+        // Get WindowTiling from WindowManager and execute split
+        if let windowManager = windowManager {
+            windowManager.executeVerticalSplit(windows: selectedWindowsForSplit)
+        } else {
+            logger.warning("Cannot execute split - WindowManager not connected", category: .keyboardSwitching)
+            DispatchQueue.main.async {
+                self.lastError = "Cannot execute split - WindowManager not available"
+            }
+        }
+        
+        // Deactivate switching mode
+        deactivateSwitchingMode()
+    }
+    
+    // MARK: - Close Mode
+    
+    /// Enter close mode (triggered by backspace key)
+    private func enterCloseMode() {
+        guard isSwitchingMode && !isCloseMode else { return }
+        
+        logger.info("❌ ENTERING CLOSE MODE", category: .keyboardSwitching)
+        
+        // Clear split selection mode if active
+        clearSplitSelectionMode()
+        
+        DispatchQueue.main.async {
+            self.isCloseMode = true
+            self.lastError = nil
+        }
+        
+        // Reset timer to give more time for window selection
+        resetSwitchingModeTimer()
+    }
+    
+    /// Clear close mode
+    private func clearCloseMode() {
+        guard isCloseMode else { return }
+        
+        logger.info("❌ CLEARING CLOSE MODE", category: .keyboardSwitching)
+        
+        DispatchQueue.main.async {
+            self.isCloseMode = false
+        }
+    }
+    
+    /// Close a window in close mode
+    private func closeWindow(_ window: WindowInfo) {
+        guard isCloseMode else { return }
+        
+        logger.info("❌ Closing window: \(window.displayName) (\(window.owner))", category: .keyboardSwitching)
+        
+        // Close the window through WindowManager
+        if let windowManager = windowManager {
+            windowManager.closeWindow(window)
+        } else {
+            logger.warning("Cannot close window - WindowManager not connected", category: .keyboardSwitching)
+            DispatchQueue.main.async {
+                self.lastError = "Cannot close window - WindowManager not available"
+            }
+        }
+        
+        // Deactivate switching mode after closing
+        deactivateSwitchingMode()
     }
     
     // MARK: - Window Management
@@ -497,6 +637,11 @@ class KeyboardSwitcher: ObservableObject {
         
         logger.debug("Switching mode keystroke: '\(keyString)' (keyCode: \(event.keyCode))", category: .keyboardSwitching)
         
+        // Handle special keys first
+        if handleSpecialKeys(keyString: keyString, keyCode: event.keyCode, modifierFlags: modifierFlags) {
+            return
+        }
+        
         // Filter out system shortcuts and modifiers
         if shouldIgnoreKeystroke(keyString: keyString, modifierFlags: modifierFlags, keyCode: event.keyCode) {
             logger.debug("Ignoring keystroke: '\(keyString)' (system shortcut or modifier)", category: .keyboardSwitching)
@@ -504,6 +649,92 @@ class KeyboardSwitcher: ObservableObject {
             return
         }
         
+        // Handle based on current mode
+        if isCloseMode {
+            handleCloseModeKeystroke(keyString: keyString)
+        } else if isSplitSelectionMode {
+            handleSplitSelectionKeystroke(keyString: keyString)
+        } else {
+            handleNormalSwitchingKeystroke(keyString: keyString)
+        }
+    }
+    
+    /// Handle special keys (/, Enter, Escape, Backspace) during switching mode
+    private func handleSpecialKeys(keyString: String, keyCode: UInt16, modifierFlags: NSEvent.ModifierFlags) -> Bool {
+        // Handle "/" key to enter split selection mode
+        if keyCode == 44 { // "/" key
+            if !isSplitSelectionMode && !isCloseMode {
+                enterSplitSelectionMode()
+                return true
+            }
+        }
+        
+        // Handle "." key to remove currently focused window from split group (while in switching mode)
+        if keyCode == 47 { // "." key
+            if isSwitchingMode && !isCloseMode {
+                logger.info("Removing focused window from split via '.'", category: .keyboardSwitching)
+                windowManager?.removeFocusedWindowFromSplit()
+                // Keep switching mode active to allow further actions
+                resetSwitchingModeTimer()
+                return true
+            }
+        }
+        
+        // Handle Backspace key to enter close mode
+        if keyCode == 51 { // Backspace (Delete)
+            if !isCloseMode {
+                enterCloseMode()
+                return true
+            }
+        }
+        
+        // Handle Enter key to execute split layout
+        if keyCode == 36 || keyCode == 76 { // Return or Enter (numeric keypad)
+            if isSplitSelectionMode {
+                executeSplitLayout()
+                return true
+            }
+        }
+        
+        // Handle Escape key to exit modes
+        if keyCode == 53 { // Escape
+            if isCloseMode {
+                clearCloseMode()
+                return true
+            } else if isSplitSelectionMode {
+                clearSplitSelectionMode()
+                return true
+            } else {
+                deactivateSwitchingMode()
+                return true
+            }
+        }
+        
+        return false
+    }
+    
+    /// Handle keystroke during split selection mode
+    private func handleSplitSelectionKeystroke(keyString: String) {
+        // Try to add window to split selection
+        if let window = getWindow(for: keyString.lowercased()) {
+            addWindowToSplitSelection(window)
+        } else {
+            logger.debug("No window mapped to key '\(keyString)' in split selection mode", category: .keyboardSwitching)
+        }
+    }
+    
+    /// Handle keystroke during close mode
+    private func handleCloseModeKeystroke(keyString: String) {
+        // Try to close window for this key
+        if let window = getWindow(for: keyString.lowercased()) {
+            closeWindow(window)
+        } else {
+            logger.debug("No window mapped to key '\(keyString)' in close mode", category: .keyboardSwitching)
+        }
+    }
+    
+    /// Handle keystroke during normal switching mode
+    private func handleNormalSwitchingKeystroke(keyString: String) {
         // Try to activate window for this key
         if let window = getWindow(for: keyString.lowercased()) {
             logger.info("🎯 Activating window for key '\(keyString)': \(window.displayName) (\(window.owner))", category: .keyboardSwitching)
@@ -531,15 +762,15 @@ class KeyboardSwitcher: ObservableObject {
             return true
         }
         
-        // Ignore arrow keys, delete, escape, etc.
+        // Ignore arrow keys, delete, etc. but allow special keys we handle
         let systemKeyCodes: Set<UInt16> = [
-            51,  // Delete
-            53,  // Escape
+            // 51,  // Delete (Backspace) - we handle this for close mode
+            // 53,  // Escape - we handle this
             123, 124, 125, 126, // Arrow keys
             115, 116, 117, 119, 121, // Home, Page Up, Delete, End, Page Down
             71,  // Clear
-            76,  // Enter (numeric keypad)
-            36,  // Return
+            // 76,  // Enter (numeric keypad) - we handle this
+            // 36,  // Return - we handle this
             48,  // Tab
         ]
         

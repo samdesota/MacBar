@@ -1019,6 +1019,66 @@ class NativeDesktopBridge: ObservableObject {
         }
     }
     
+    func closeWindow(windowID: CGWindowID) -> WindowMoveResult {
+        guard hasAccessibilityPermission else {
+            return .permissionDenied
+        }
+        
+        guard let axWindow = getAXWindowElement(for: windowID) else {
+            return .windowNotFound
+        }
+        
+        // Check if the window has a close button
+        var closeButton: CFTypeRef?
+        let closeButtonResult = AXUIElementCopyAttributeValue(axWindow, kAXCloseButtonAttribute as CFString, &closeButton)
+        
+        if closeButtonResult == .success, let button = closeButton {
+            // Use the close button if available
+            let result = AXUIElementPerformAction(button as! AXUIElement, kAXPressAction as CFString)
+            
+            if result == .success {
+                return .success
+            } else {
+                return .failed(getAXErrorMessage(result))
+            }
+        } else {
+            // Fallback to sending Command+W keystroke to the window
+            return closeWindowWithKeyboardShortcut(windowID: windowID)
+        }
+    }
+    
+    private func closeWindowWithKeyboardShortcut(windowID: CGWindowID) -> WindowMoveResult {
+        // First activate the window to ensure it receives the keystroke
+        let activateResult = activateWindow(windowID: windowID)
+        guard case .success = activateResult else {
+            return activateResult
+        }
+        
+        // Small delay to ensure window activation completes
+        usleep(50000) // 50ms
+        
+        // Send Command+W keystroke
+        let source = CGEventSource(stateID: .hidSystemState)
+        
+        // Create keydown event for Command+W
+        guard let keyDownEvent = CGEvent(keyboardEventSource: source, virtualKey: 13, keyDown: true) else {
+            return .failed("Failed to create key down event")
+        }
+        keyDownEvent.flags = .maskCommand
+        
+        // Create keyup event for Command+W
+        guard let keyUpEvent = CGEvent(keyboardEventSource: source, virtualKey: 13, keyDown: false) else {
+            return .failed("Failed to create key up event")
+        }
+        keyUpEvent.flags = .maskCommand
+        
+        // Post the events
+        keyDownEvent.post(tap: .cghidEventTap)
+        keyUpEvent.post(tap: .cghidEventTap)
+        
+        return .success
+    }
+    
     // MARK: - Window Information
     
     func getWindowTitle(windowID: CGWindowID) -> String? {

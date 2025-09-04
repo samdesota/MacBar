@@ -186,7 +186,12 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
             self.checkAccessibilityPermission()
             self.updateWindowList() // Full window list refresh every 10 seconds as safety net
             self.windowTiling?.preventTaskbarOverlap() // Now handled by WindowTiling
+            self.windowTiling?.rebalanceSplitViews() // Rebalance split view sizing based on user changes
             self.windowTiling?.clearOldRestrictions() // Clean up old size restriction records
+            
+            // Clean up split groups for windows that no longer exist
+            let currentWindowIDs = Set((self.spaceWindows[self.currentActiveSpaceID] ?? []).map { $0.id })
+            self.windowTiling?.cleanupSplitGroups(availableWindowIDs: currentWindowIDs)
         }
         
         // Refresh observers after a delay to ensure everything is set up properly
@@ -247,6 +252,27 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
     /// Get current window padding value
     func getWindowPadding() -> CGFloat {
         return windowTiling?.getWindowPadding() ?? 5
+    }
+    
+    /// Execute vertical split layout for multiple windows
+    func executeVerticalSplit(windows: [WindowInfo]) {
+        windowTiling?.executeVerticalSplit(windows: windows)
+    }
+    
+    /// Remove the currently focused window from its split group
+    func removeFocusedWindowFromSplit() {
+        let focused = nativeBridge.getFocusedWindowID()
+        if let id = focused {
+            logger.info("Removing focused window from split: \(id)", category: .windowManager)
+            _ = windowTiling?.removeWindowFromSplit(windowID: id, dissolveIfPair: true)
+        } else {
+            logger.debug("No focused window to remove from split", category: .windowManager)
+        }
+    }
+    
+    /// Handle focus change for split window synchronization
+    private func handleFocusChangeForSplitSync(windowID: CGWindowID?) {
+        windowTiling?.handleWindowFocusChanged(focusedWindowID: windowID)
     }
     
 
@@ -339,6 +365,11 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
             for change in focusChanges {
                 logger.info("  \(change)", category: .focusSwitching)
             }
+        }
+        
+        // Handle split window synchronization before updating UI
+        if let focusedWindowID = focusedWindowID {
+            handleFocusChangeForSplitSync(windowID: focusedWindowID)
         }
         
         // Update on main thread - only update the current space
@@ -598,6 +629,23 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
             logger.warning("Failed to minimize window: \(windowInfo.displayName), error: \(error)", category: .focusSwitching)
         case .permissionDenied:
             logger.warning("Permission denied for minimizing window: \(windowInfo.displayName)", category: .focusSwitching)
+        case .windowNotFound:
+            logger.error("Window not found: \(windowInfo.displayName)", category: .focusSwitching)
+        }
+    }
+    
+    func closeWindow(_ windowInfo: WindowInfo) {
+        logger.info("Attempting to close window: \(windowInfo.displayName)", category: .focusSwitching)
+        
+        let result = nativeBridge.closeWindow(windowID: windowInfo.id)
+        
+        switch result {
+        case .success:
+            logger.info("Successfully closed window: \(windowInfo.displayName)", category: .focusSwitching)
+        case .failed(let error):
+            logger.warning("Failed to close window: \(windowInfo.displayName), error: \(error)", category: .focusSwitching)
+        case .permissionDenied:
+            logger.warning("Permission denied for closing window: \(windowInfo.displayName)", category: .focusSwitching)
         case .windowNotFound:
             logger.error("Window not found: \(windowInfo.displayName)", category: .focusSwitching)
         }
