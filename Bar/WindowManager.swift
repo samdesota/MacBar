@@ -18,7 +18,7 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
     @Published var currentSpaceID: String = ""
     
     private var timer: Timer?
-    private var windowOrder: [CGWindowID] = [] // Track order by window ID
+    private var windowOrder: [UInt64: [CGWindowID]] = [:] // Track order by space ID -> window IDs
     private var taskbarHeight: CGFloat = 42
     private var taskbarY: CGFloat = 0
     private let logger = Logger.shared
@@ -229,7 +229,53 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
     }
     
     func getWindowsForSpace(_ spaceID: UInt64) -> [WindowInfo] {
-        return spaceWindows[spaceID] ?? []
+        guard let windows = spaceWindows[spaceID] else { return [] }
+        
+        // Get the custom order for this space, or use natural order
+        guard let order = windowOrder[spaceID] else {
+            return windows
+        }
+        
+        // Sort windows according to custom order
+        let orderedWindows = order.compactMap { windowID in
+            windows.first { $0.id == windowID }
+        }
+        
+        // Add any windows not in the order list (newly appeared windows)
+        let unorderedWindows = windows.filter { window in
+            !order.contains(window.id)
+        }
+        
+        return orderedWindows + unorderedWindows
+    }
+    
+    /// Reorder windows within a space by moving a window from one position to another
+    func reorderWindow(windowID: CGWindowID, fromIndex: Int, toIndex: Int, spaceID: UInt64) {
+        guard let windows = spaceWindows[spaceID] else { return }
+        
+        // Initialize window order if it doesn't exist
+        if windowOrder[spaceID] == nil {
+            windowOrder[spaceID] = windows.map { $0.id }
+        }
+        
+        guard var order = windowOrder[spaceID] else { return }
+        
+        // Ensure indices are valid
+        guard fromIndex >= 0 && fromIndex < order.count && 
+              toIndex >= 0 && toIndex < order.count && 
+              fromIndex != toIndex else { return }
+        
+        // Move the window ID from one position to another
+        let movedWindowID = order.remove(at: fromIndex)
+        order.insert(movedWindowID, at: toIndex)
+        
+        // Update the order
+        windowOrder[spaceID] = order
+        
+        // Trigger UI update
+        objectWillChange.send()
+        
+        logger.info("Reordered window \(windowID) from index \(fromIndex) to \(toIndex) in space \(spaceID)", category: .taskbar)
     }
     
     // MARK: - Window Tiling Interface
