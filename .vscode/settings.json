@@ -4,7 +4,7 @@
         "sourcekit-lsp"
     ],
     "swift.disableAutoSourcekitLsp": false,
-    "swift.path": "/usr/bin/xcrun",
+    "swift.path": "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin",
     "swift.args": [
         "swift"
     ],
@@ -18,5 +18,8 @@
         "**/DerivedData": true,
         "**/*.xcodeproj/xcuserdata": true,
         "**/*.xcodeproj/project.xcworkspace/xcuserdata": true
+    },
+    "swift.swiftEnvironmentVariables": {
+        "DEVELOPER_DIR": "/Applications/Xcode.app"
     }
 }

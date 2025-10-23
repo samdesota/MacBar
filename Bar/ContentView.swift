@@ -70,7 +70,17 @@ struct TaskbarView: View {
     
     // Get windows for this space
     private var windows: [WindowInfo] {
-        return windowManager.getWindowsForSpace(self.spaceIDToUInt64(spaceID))
+        let windowList = windowManager.getWindowsForSpace(self.spaceIDToUInt64(spaceID))
+        
+        // Log when window list changes
+        let windowIDs = windowList.map { $0.id }
+        let widthsMissing = windowIDs.filter { windowWidths[$0] == nil }
+        
+        if !widthsMissing.isEmpty {
+            logger.debug("⚠️ Windows without width measurements: \(widthsMissing.map { "\($0)" })", category: .taskbar)
+        }
+        
+        return windowList
     }
     
     // Calculate offset for window at given index during drag
@@ -137,6 +147,12 @@ struct TaskbarView: View {
             // Start dragging
             draggedWindowID = window.id
             draggedWindowIndex = index
+            
+            // Log drag start with width information
+            let hasWidth = windowWidths[window.id] != nil
+            let width = windowWidths[window.id] ?? 200
+            logger.info("🎯 Starting drag for window \(window.id) (\(window.displayName)): hasWidth=\(hasWidth), width=\(width), index=\(index)", category: .taskbar)
+            logger.info("📐 Current windowWidths count: \(windowWidths.count), keys: \(Array(windowWidths.keys))", category: .taskbar)
         }
         
         dragOffset = value.translation
@@ -146,17 +162,24 @@ struct TaskbarView: View {
         var cumulativeWidth: CGFloat = 0
         var newIndex = index
         
+        logger.debug("🔄 Drag calculation: distance=\(String(format: "%.1f", dragDistance)), currentIndex=\(index), windowCount=\(windows.count)", category: .taskbar)
+        
         if dragDistance > 0 {
             // Dragging right
             for i in (index + 1)..<windows.count {
                 let windowID = windows[i].id
                 let windowWidth = windowWidths[windowID] ?? 200
+                let hasActualWidth = windowWidths[windowID] != nil
                 let spacing: CGFloat = 8
                 cumulativeWidth += windowWidth + spacing
                 
+                logger.debug("  📊 Right drag - window \(i) (ID: \(windowID), \(windows[i].displayName)): width=\(windowWidth), hasActual=\(hasActualWidth), cumulative=\(String(format: "%.1f", cumulativeWidth))", category: .taskbar)
+                
                 if dragDistance > cumulativeWidth - (windowWidth + spacing) / 2 {
                     newIndex = i
+                    logger.debug("  ✅ Updated target index to \(newIndex)", category: .taskbar)
                 } else {
+                    logger.debug("  🛑 Breaking at index \(i)", category: .taskbar)
                     break
                 }
             }
@@ -165,12 +188,17 @@ struct TaskbarView: View {
             for i in (0..<index).reversed() {
                 let windowID = windows[i].id
                 let windowWidth = windowWidths[windowID] ?? 200
+                let hasActualWidth = windowWidths[windowID] != nil
                 let spacing: CGFloat = 8
                 cumulativeWidth -= windowWidth + spacing
                 
+                logger.debug("  📊 Left drag - window \(i) (ID: \(windowID), \(windows[i].displayName)): width=\(windowWidth), hasActual=\(hasActualWidth), cumulative=\(String(format: "%.1f", cumulativeWidth))", category: .taskbar)
+                
                 if dragDistance < cumulativeWidth + (windowWidth + spacing) / 2 {
                     newIndex = i
+                    logger.debug("  ✅ Updated target index to \(newIndex)", category: .taskbar)
                 } else {
+                    logger.debug("  🛑 Breaking at index \(i)", category: .taskbar)
                     break
                 }
             }
@@ -178,12 +206,17 @@ struct TaskbarView: View {
         
         let clampedIndex = max(0, min(windows.count - 1, newIndex))
         if targetIndex != clampedIndex {
+            logger.info("🎯 Target index changed: \(targetIndex ?? -1) -> \(clampedIndex)", category: .taskbar)
             targetIndex = clampedIndex
         }
     }
     
     // Handle drag ended
     private func handleDragEnded(window: WindowInfo, value: DragGesture.Value) {
+        let finalDistance = value.translation.width
+        logger.info("🏁 Drag ended for window \(window.id) (\(window.displayName)): distance=\(String(format: "%.1f", finalDistance))", category: .taskbar)
+        logger.info("🎯 Final drag state: fromIndex=\(draggedWindowIndex ?? -1), toIndex=\(targetIndex ?? -1)", category: .taskbar)
+        
         // Apply the reorder
         if let fromIndex = draggedWindowIndex,
            let toIndex = targetIndex,
@@ -191,6 +224,9 @@ struct TaskbarView: View {
             
             isApplyingReorder = true
             let spaceIDUInt64 = spaceIDToUInt64(spaceID)
+            
+            logger.info("✅ Executing reorder: window \(window.id) from index \(fromIndex) to \(toIndex) in space \(spaceIDUInt64)", category: .taskbar)
+            logger.info("📋 Window order before reorder: \(windows.map { "\($0.id):\($0.displayName)" })", category: .taskbar)
             
             // Apply reorder to WindowManager
             windowManager.reorderWindow(
@@ -200,11 +236,16 @@ struct TaskbarView: View {
                 spaceID: spaceIDUInt64
             )
             
+            // Update key assignments after reordering
+            keyboardSwitcher.updateKeyAssignments()
+            
             // Delay the state reset to allow WindowManager update to propagate
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                self.logger.info("🔄 Resetting drag state after reorder", category: .taskbar)
                 resetDragState()
             }
         } else {
+            logger.info("❌ No reorder needed - fromIndex=\(draggedWindowIndex ?? -1), toIndex=\(targetIndex ?? -1)", category: .taskbar)
             // No reorder needed, reset immediately
             resetDragState()
         }
@@ -251,6 +292,10 @@ struct TaskbarView: View {
                             )
                             .animation(.easeInOut(duration: 0.15), value: draggedWindowID == window.id)
                             .gesture(dragGesture(for: window, at: index))
+                            .onAppear {
+                                let hasWidth = windowWidths[window.id] != nil
+                                logger.debug("👀 Window button appeared: \(window.id) (\(window.displayName)), hasWidth: \(hasWidth)", category: .taskbar)
+                            }
                         }
                     }
                     .animation(.easeInOut(duration: 0.2), value: windows.map { $0.id })
@@ -343,6 +388,19 @@ struct TaskbarView: View {
             }
         }
         .onPreferenceChange(WindowSizePreferenceKey.self) { sizes in
+            let previousCount = windowWidths.count
+            let newCount = sizes.count
+            let newWindowIDs = Set(sizes.keys).subtracting(Set(windowWidths.keys))
+            let removedWindowIDs = Set(windowWidths.keys).subtracting(Set(sizes.keys))
+            
+            logger.info("📐 Window widths updated: \(previousCount) -> \(newCount) windows", category: .taskbar)
+            if !newWindowIDs.isEmpty {
+                logger.info("🆕 New window widths measured: \(newWindowIDs.map { "\($0):\(sizes[$0] ?? 0)" })", category: .taskbar)
+            }
+            if !removedWindowIDs.isEmpty {
+                logger.info("🗑️ Window widths removed: \(removedWindowIDs)", category: .taskbar)
+            }
+            
             windowWidths = sizes
         }
     }
@@ -372,6 +430,10 @@ struct TaskbarView: View {
                 toIndex: destination > sourceIndex ? destination - 1 : destination,
                 spaceID: spaceIDUInt64
             )
+            
+            // Update key assignments after reordering
+            // Note: This method is passed keyboardSwitcher via the parent view
+            // keyboardSwitcher.updateKeyAssignments()
         }
         
         logger.info("Moved window from \(source) to \(destination)", category: .taskbar)
@@ -453,6 +515,9 @@ struct WindowButton: View {
     
     /// Get the assigned key for this window from KeyboardSwitcher
     private func getAssignedKey() -> String? {
+        // Access keyAssignmentVersion to make this reactive to changes
+        _ = keyboardSwitcher.keyAssignmentVersion
+        
         let keyAssignments = keyboardSwitcher.getKeyAssignments()
         return keyAssignments[windowID]
     }

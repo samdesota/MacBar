@@ -24,9 +24,16 @@ class KeyboardSwitcher: ObservableObject {
     // Close mode
     @Published var isCloseMode: Bool = false
     
+    // Key sequence tracking for backspace + arrow combinations
+    private var lastBackspaceTime: Date?
+    private let backspaceArrowTimeout: TimeInterval = 1.0 // 1 second to press arrow after backspace
+    
     private let logger = Logger.shared
     private let permissionManager = KeyboardPermissionManager.shared
     private let keyAssignmentManager = KeyAssignmentManager.shared
+    
+    // Republish key assignment changes for UI reactivity
+    @Published var keyAssignmentVersion: Int = 0
     
     // Window management integration
     private weak var windowManager: WindowManager?
@@ -306,6 +313,9 @@ class KeyboardSwitcher: ObservableObject {
         clearSplitSelectionMode()
         clearCloseMode()
         
+        // Clear backspace timing when deactivating switching mode
+        lastBackspaceTime = nil
+        
         DispatchQueue.main.async {
             self.isSwitchingMode = false
         }
@@ -429,6 +439,9 @@ class KeyboardSwitcher: ObservableObject {
         
         logger.info("❌ CLEARING CLOSE MODE", category: .keyboardSwitching)
         
+        // Clear backspace timing when exiting close mode
+        lastBackspaceTime = nil
+        
         DispatchQueue.main.async {
             self.isCloseMode = false
         }
@@ -498,6 +511,16 @@ class KeyboardSwitcher: ObservableObject {
     /// Get all current key assignments
     func getKeyAssignments() -> [CGWindowID: String] {
         return keyAssignmentManager.getAllAssignments()
+    }
+    
+    /// Update key assignments when window order changes (called from UI)
+    func updateKeyAssignments() {
+        updateWindowListAndAssignKeys()
+        
+        // Increment version to trigger UI updates
+        DispatchQueue.main.async {
+            self.keyAssignmentVersion += 1
+        }
     }
     
     // MARK: - Testing Support
@@ -680,9 +703,17 @@ class KeyboardSwitcher: ObservableObject {
             }
         }
         
-        // Handle Backspace key to enter close mode
+        // Handle Backspace key - check for shift modifier first
         if keyCode == 51 { // Backspace (Delete)
-            if !isCloseMode {
+            if modifierFlags.contains(.shift) {
+                // Shift-Backspace: Close all other windows except current
+                logger.info("Shift-Backspace detected: closing all other windows", category: .keyboardSwitching)
+                windowManager?.closeOtherWindows()
+                deactivateSwitchingMode()
+                return true
+            } else if !isCloseMode {
+                // Regular backspace: enter close mode and track for potential arrow key sequence
+                lastBackspaceTime = Date()
                 enterCloseMode()
                 return true
             }
@@ -692,6 +723,23 @@ class KeyboardSwitcher: ObservableObject {
         if keyCode == 36 || keyCode == 76 { // Return or Enter (numeric keypad)
             if isSplitSelectionMode {
                 executeSplitLayout()
+                return true
+            }
+        }
+        
+        // Handle arrow keys in close mode (for backspace + arrow combinations)
+        if isCloseMode && (keyCode == 123 || keyCode == 124) { // Left arrow (123) or Right arrow (124)
+            if let backspaceTime = lastBackspaceTime,
+               Date().timeIntervalSince(backspaceTime) <= backspaceArrowTimeout {
+                // Valid backspace + arrow sequence
+                if keyCode == 123 { // Left arrow
+                    logger.info("Backspace + Left Arrow detected: closing windows to the left", category: .keyboardSwitching)
+                    windowManager?.closeWindowsToLeft()
+                } else { // Right arrow
+                    logger.info("Backspace + Right Arrow detected: closing windows to the right", category: .keyboardSwitching)
+                    windowManager?.closeWindowsToRight()
+                }
+                deactivateSwitchingMode()
                 return true
             }
         }
@@ -766,13 +814,20 @@ class KeyboardSwitcher: ObservableObject {
         let systemKeyCodes: Set<UInt16> = [
             // 51,  // Delete (Backspace) - we handle this for close mode
             // 53,  // Escape - we handle this
-            123, 124, 125, 126, // Arrow keys
+            // 123, 124, // Left/Right Arrow keys - we handle these in close mode for backspace combinations
+            125, 126, // Up/Down Arrow keys
             115, 116, 117, 119, 121, // Home, Page Up, Delete, End, Page Down
             71,  // Clear
             // 76,  // Enter (numeric keypad) - we handle this
             // 36,  // Return - we handle this
             48,  // Tab
         ]
+        
+        // Allow left/right arrow keys only in close mode (for backspace + arrow combinations)
+        if (keyCode == 123 || keyCode == 124) && !isCloseMode {
+            logger.debug("Ignoring arrow key outside close mode: \(keyCode)", category: .keyboardSwitching)
+            return true
+        }
         
         if systemKeyCodes.contains(keyCode) {
             logger.debug("Ignoring system key: \(keyCode)", category: .keyboardSwitching)

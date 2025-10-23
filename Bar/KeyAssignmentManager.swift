@@ -8,7 +8,8 @@
 import Foundation
 import AppKit
 
-/// Manages intelligent key assignment for window switching
+/// Manages positional key assignment for window switching
+/// Keys are assigned based on window position in taskbar: 1-9, 0, then QWERTY layout
 class KeyAssignmentManager: ObservableObject {
     static let shared = KeyAssignmentManager()
     
@@ -21,66 +22,45 @@ class KeyAssignmentManager: ObservableObject {
     
     // Available keys for assignment (prioritized order)
     private let availableKeys: [String] = {
-        // Alphanumeric keys in preference order
-        let letters = "abcdefghijklmnopqrstuvwxyz".map { String($0) }
+        // Numbers 1-9, then 0 (for 10th window), then QWERTY layout
         let numbers = "1234567890".map { String($0) }
-        return letters + numbers
+        let qwertyRow1 = "qwertyuiop".map { String($0) }
+        let qwertyRow2 = "asdfghjkl".map { String($0) }
+        let qwertyRow3 = "zxcvbnm".map { String($0) }
+        return numbers + qwertyRow1 + qwertyRow2 + qwertyRow3
     }()
     
     private init() {
         logger.info("KeyAssignmentManager initialized", category: .keyboardSwitching)
-        loadPersistedAssignments()
+        // Note: No need to load persisted assignments for positional key assignment system
     }
     
     // MARK: - Public API
     
-    /// Assign keys to all windows using intelligent algorithm
+    /// Assign keys to all windows based on their position in the taskbar
     func assignKeys(to windows: [WindowInfo]) {
-        logger.info("Starting key assignment for \(windows.count) windows", category: .keyboardSwitching)
+        logger.info("Starting positional key assignment for \(windows.count) windows", category: .keyboardSwitching)
         
-        // Clean up assignments for windows that no longer exist
-        let currentWindowIDs = Set(windows.map { $0.id })
-        let previousAssignmentCount = keyAssignments.count
-        keyAssignments = keyAssignments.filter { currentWindowIDs.contains($0.key) }
+        // Clear all existing assignments to reassign based on current positions
+        keyAssignments.removeAll()
+        assignedKeys.removeAll()
         
-        // Update assignedKeys to match current assignments
-        assignedKeys = Set(keyAssignments.values)
-        
-        let cleanedCount = previousAssignmentCount - keyAssignments.count
-        if cleanedCount > 0 {
-            logger.info("Cleaned up \(cleanedCount) assignments for closed windows", category: .keyboardSwitching)
-        }
-        
-        // Only assign keys to windows that don't already have assignments
-        let windowsNeedingAssignment = windows.filter { keyAssignments[$0.id] == nil }
-        logger.info("\(keyAssignments.count) windows have existing assignments, \(windowsNeedingAssignment.count) need new assignments", category: .keyboardSwitching)
-        
-        // Sort new windows by preference (active first, then alphabetically by display name)
-        let sortedNewWindows = sortWindowsByPriority(windowsNeedingAssignment)
-        
-        for window in sortedNewWindows {
-            if let assignedKey = assignKey(for: window) {
-                keyAssignments[window.id] = assignedKey
-                assignedKeys.insert(assignedKey)
-                
-                logger.debug("Assigned key '\(assignedKey)' to new window '\(window.displayName)' (\(window.owner))", category: .keyboardSwitching)
-            } else {
-                logger.warning("Failed to assign key to window '\(window.displayName)' (\(window.owner)) - no available keys", category: .keyboardSwitching)
+        // Assign keys based on window position in the array
+        for (index, window) in windows.enumerated() {
+            guard index < availableKeys.count else {
+                logger.warning("Not enough keys available for window at position \(index + 1): '\(window.displayName)' (\(window.owner))", category: .keyboardSwitching)
+                break
             }
+            
+            let assignedKey = availableKeys[index]
+            keyAssignments[window.id] = assignedKey
+            assignedKeys.insert(assignedKey)
+            
+            logger.debug("Assigned key '\(assignedKey)' to window at position \(index + 1): '\(window.displayName)' (\(window.owner))", category: .keyboardSwitching)
         }
         
-        // Log preserved assignments for debugging
-        let preservedWindows = windows.filter { window in
-            keyAssignments[window.id] != nil && !windowsNeedingAssignment.contains(where: { $0.id == window.id })
-        }
-        for window in preservedWindows {
-            if let key = keyAssignments[window.id] {
-                logger.debug("Preserved key '\(key)' for existing window '\(window.displayName)' (\(window.owner))", category: .keyboardSwitching)
-            }
-        }
-        
-        logger.info("Key assignment completed: \(keyAssignments.count) windows assigned, \(assignedKeys.count) keys used", category: .keyboardSwitching)
-        persistAssignments()
+        logger.info("Positional key assignment completed: \(keyAssignments.count) windows assigned", category: .keyboardSwitching)
+        // Note: No persistence needed for positional assignments - they are recalculated each time
     }
     
     /// Get the assigned key for a specific window
@@ -103,93 +83,10 @@ class KeyAssignmentManager: ObservableObject {
         logger.info("Clearing all key assignments", category: .keyboardSwitching)
         keyAssignments.removeAll()
         assignedKeys.removeAll()
-        persistAssignments()
+        // Note: No persistence needed for positional assignments
     }
     
     // MARK: - Private Implementation
-    
-    /// Sort windows by assignment priority
-    private func sortWindowsByPriority(_ windows: [WindowInfo]) -> [WindowInfo] {
-        return windows.sorted { window1, window2 in
-            // Active windows first
-            if window1.isActive != window2.isActive {
-                return window1.isActive
-            }
-            
-            // Then sort alphabetically by display name
-            return window1.displayName.localizedCaseInsensitiveCompare(window2.displayName) == .orderedAscending
-        }
-    }
-    
-    /// Assign a key to a specific window using intelligent algorithm
-    private func assignKey(for window: WindowInfo) -> String? {
-        logger.debug("Assigning key for window: '\(window.displayName)' (owner: '\(window.owner)')", category: .keyboardSwitching)
-        
-        // Strategy 1: Try first letter of app name (owner)
-        if let key = tryFirstLetterStrategy(for: window.owner) {
-            logger.debug("Strategy 1 success: first letter of app name '\(window.owner)' → '\(key)'", category: .keyboardSwitching)
-            return key
-        }
-        
-        // Strategy 2: Try subsequent letters of app name
-        if let key = trySubsequentLettersStrategy(for: window.owner) {
-            logger.debug("Strategy 2 success: subsequent letter of app name '\(window.owner)' → '\(key)'", category: .keyboardSwitching)
-            return key
-        }
-        
-        // Strategy 3: Try first letter of window name (if different from app name)
-        if !window.name.isEmpty && window.name != window.owner {
-            if let key = tryFirstLetterStrategy(for: window.name) {
-                logger.debug("Strategy 3 success: first letter of window name '\(window.name)' → '\(key)'", category: .keyboardSwitching)
-                return key
-            }
-            
-            // Strategy 4: Try subsequent letters of window name
-            if let key = trySubsequentLettersStrategy(for: window.name) {
-                logger.debug("Strategy 4 success: subsequent letter of window name '\(window.name)' → '\(key)'", category: .keyboardSwitching)
-                return key
-            }
-        }
-        
-        // Strategy 5: Fall back to any available key
-        if let key = findNextAvailableKey() {
-            logger.debug("Strategy 5 fallback: assigned available key '\(key)'", category: .keyboardSwitching)
-            return key
-        }
-        
-        logger.warning("No key could be assigned for window '\(window.displayName)'", category: .keyboardSwitching)
-        return nil
-    }
-    
-    /// Try to assign the first letter of a name
-    private func tryFirstLetterStrategy(for name: String) -> String? {
-        guard let firstChar = name.lowercased().first,
-              firstChar.isLetter else {
-            return nil
-        }
-        
-        let key = String(firstChar)
-        return assignedKeys.contains(key) ? nil : key
-    }
-    
-    /// Try to assign subsequent letters of a name
-    private func trySubsequentLettersStrategy(for name: String) -> String? {
-        let cleanName = name.lowercased().filter { $0.isLetter }
-        
-        for char in cleanName.dropFirst() {
-            let key = String(char)
-            if !assignedKeys.contains(key) {
-                return key
-            }
-        }
-        
-        return nil
-    }
-    
-    /// Find the next available key from the prioritized list
-    private func findNextAvailableKey() -> String? {
-        return availableKeys.first { !assignedKeys.contains($0) }
-    }
     
     // MARK: - Persistence
     
@@ -283,7 +180,7 @@ extension KeyAssignmentManager {
             createMockWindowInfo(name: "Photoshop 2024", owner: "Adobe Photoshop 2024"),
             createMockWindowInfo(name: "Excel", owner: "Microsoft Excel"),
             
-            // More apps to test sfllback to numbers
+            // More apps to test fallback to QWERTY keys
             createMockWindowInfo(name: "Finder", owner: "Finder"),
             createMockWindowInfo(name: "Mail", owner: "Mail"),
             createMockWindowInfo(name: "Calendar", owner: "Calendar"),

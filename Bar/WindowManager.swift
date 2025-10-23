@@ -225,7 +225,7 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
     // MARK: - Space Management
     
     func getWindowsForCurrentSpace() -> [WindowInfo] {
-        return spaceWindows[currentActiveSpaceID] ?? []
+        return getWindowsForSpace(currentActiveSpaceID)
     }
     
     func getWindowsForSpace(_ spaceID: UInt64) -> [WindowInfo] {
@@ -482,6 +482,7 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
         
         // Apply order stabilization to maintain consistent window ordering
         let orderedWindows = maintainStableOrderByWindow(currentWindows: windowInfos, newOrder: newWindowOrder)
+        windowOrder[currentActiveSpaceID] = orderedWindows.map { $0.id }
 
         // Update display names based on whether there are multiple windows per app
         let currentSpaceWindows = updateDisplayNamesForMultipleWindows(orderedWindows)
@@ -574,7 +575,7 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
         var usedWindowIDs: Set<CGWindowID> = []
         
         // First, add existing windows in their current order (from current space)
-        let existingWindows = spaceWindows[currentActiveSpaceID] ?? []
+        let existingWindows = getWindowsForSpace(currentActiveSpaceID)
         
         logger.info("🔄 Maintaining stable order for \(existingWindows.count) existing windows and \(newOrder.count) new windows", category: .windowManager)
 
@@ -694,6 +695,76 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
             logger.warning("Permission denied for closing window: \(windowInfo.displayName)", category: .focusSwitching)
         case .windowNotFound:
             logger.error("Window not found: \(windowInfo.displayName)", category: .focusSwitching)
+        }
+    }
+    
+    /// Close all windows except the currently focused one
+    func closeOtherWindows() {
+        logger.info("Attempting to close all other windows except current", category: .focusSwitching)
+        
+        let currentWindows = getWindowsForCurrentSpace()
+        let focusedWindowID = nativeBridge.getFocusedWindowID()
+        
+        guard let focusedID = focusedWindowID else {
+            logger.warning("No focused window found, cannot close other windows", category: .focusSwitching)
+            return
+        }
+        
+        let windowsToClose = currentWindows.filter { $0.id != focusedID }
+        logger.info("Closing \(windowsToClose.count) windows (keeping focused window \(focusedID))", category: .focusSwitching)
+        
+        for window in windowsToClose {
+            closeWindow(window)
+        }
+    }
+    
+    /// Close all windows to the left of the currently focused window in the taskbar order
+    func closeWindowsToLeft() {
+        logger.info("Attempting to close windows to the left of current window", category: .focusSwitching)
+        
+        let currentWindows = getWindowsForCurrentSpace()
+        let focusedWindowID = nativeBridge.getFocusedWindowID()
+        
+        guard let focusedID = focusedWindowID else {
+            logger.warning("No focused window found, cannot close windows to left", category: .focusSwitching)
+            return
+        }
+        
+        guard let focusedIndex = currentWindows.firstIndex(where: { $0.id == focusedID }) else {
+            logger.warning("Focused window not found in current space windows", category: .focusSwitching)
+            return
+        }
+        
+        let windowsToClose = Array(currentWindows[0..<focusedIndex])
+        logger.info("Closing \(windowsToClose.count) windows to the left of focused window", category: .focusSwitching)
+        
+        for window in windowsToClose {
+            closeWindow(window)
+        }
+    }
+    
+    /// Close all windows to the right of the currently focused window in the taskbar order
+    func closeWindowsToRight() {
+        logger.info("Attempting to close windows to the right of current window", category: .focusSwitching)
+        
+        let currentWindows = getWindowsForCurrentSpace()
+        let focusedWindowID = nativeBridge.getFocusedWindowID()
+        
+        guard let focusedID = focusedWindowID else {
+            logger.warning("No focused window found, cannot close windows to right", category: .focusSwitching)
+            return
+        }
+        
+        guard let focusedIndex = currentWindows.firstIndex(where: { $0.id == focusedID }) else {
+            logger.warning("Focused window not found in current space windows", category: .focusSwitching)
+            return
+        }
+        
+        let windowsToClose = Array(currentWindows[(focusedIndex + 1)...])
+        logger.info("Closing \(windowsToClose.count) windows to the right of focused window", category: .focusSwitching)
+        
+        for window in windowsToClose {
+            closeWindow(window)
         }
     }
 }
