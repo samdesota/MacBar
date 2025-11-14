@@ -24,6 +24,7 @@ struct BarApp: App {
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var dockWindows: [String: NSWindow] = [:] // Space ID -> Window mapping
+    var windowScreenMap: [String: NSScreen] = [:] // Space ID -> Screen mapping
     var permissionWindow: NSWindow?
     var settingsWindow: NSWindow?
     private let logger = Logger.shared
@@ -33,6 +34,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let windowManager = WindowManager() // Single WindowManager instance
     private var cancellables = Set<AnyCancellable>()
     private var currentActiveSpaceID: String = ""
+    private var screenChangeObserver: NSObjectProtocol?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Hide app from dock
@@ -42,6 +44,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupNotificationObservers()
     }
     
+    deinit {
+        // Clean up screen change observer
+        if let observer = screenChangeObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+    
     func setupNotificationObservers() {
         NotificationCenter.default.addObserver(
             self,
@@ -49,6 +58,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSNotification.Name("OpenSettings"),
             object: nil
         )
+        
+        // Observe screen parameter changes (resolution, arrangement, etc.)
+        screenChangeObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            self?.handleScreenParametersChanged()
+        }
     }
     
     @objc func openSettingsWindow() {
@@ -72,6 +90,61 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.title = "Bar Settings"
         window.center()
         window.makeKeyAndOrderFront(nil)
+    }
+    
+    func handleScreenParametersChanged() {
+        logger.info("🖥️ Screen parameters changed - updating taskbar windows", category: .taskbar)
+        
+        // Update all existing taskbar windows to match their screen's current resolution
+        for (spaceID, window) in dockWindows {
+            updateTaskbarWindowSize(for: spaceID, window: window)
+        }
+    }
+    
+    func updateTaskbarWindowSize(for spaceID: String, window: NSWindow) {
+        // Get the screen this window should be on
+        let targetScreen = getScreenForWindow(window) ?? NSScreen.main
+        
+        guard let screen = targetScreen else {
+            logger.warning("⚠️ No screen found for taskbar window", category: .taskbar)
+            return
+        }
+        
+        // Update the stored screen mapping
+        windowScreenMap[spaceID] = screen
+        
+        // Calculate new window frame based on screen's visible frame
+        let screenFrame = screen.visibleFrame
+        let newWidth = screenFrame.width - 10
+        let newX = screenFrame.minX + 5
+        let newY = screenFrame.minY + 5
+        
+        logger.info("🖥️ Updating taskbar for space \(spaceID): width=\(newWidth), screen=\(screen.localizedName)", category: .taskbar)
+        
+        // Update window size and position
+        window.setFrame(
+            NSRect(x: newX, y: newY, width: newWidth, height: 42),
+            display: true,
+            animate: true
+        )
+    }
+    
+    func getScreenForWindow(_ window: NSWindow) -> NSScreen? {
+        // Get the screen that contains the window's center point
+        let windowCenter = CGPoint(
+            x: window.frame.midX,
+            y: window.frame.midY
+        )
+        
+        // Find the screen that contains this point
+        for screen in NSScreen.screens {
+            if screen.frame.contains(windowCenter) {
+                return screen
+            }
+        }
+        
+        // If no screen contains the center, return the screen closest to the window
+        return window.screen ?? NSScreen.main
     }
     
     func checkPermissionsAndSetup() {
@@ -151,8 +224,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         let contentView = NSHostingView(rootView: ContentView(spaceID: currentSpaceID).environmentObject(windowManager))
         
+        // Determine which screen to use - prefer the screen with the mouse cursor
+        let targetScreen = getScreenWithMouseCursor() ?? NSScreen.main ?? NSScreen.screens.first
+        
+        guard let screen = targetScreen else {
+            logger.warning("⚠️ No screen available for taskbar window", category: .taskbar)
+            return
+        }
+        
+        // Store the screen mapping
+        windowScreenMap[currentSpaceID] = screen
+        
         // Get screen width to make taskbar full width
-        let screenWidth = NSScreen.main?.visibleFrame.width ?? 1200
+        let screenFrame = screen.visibleFrame
+        let screenWidth = screenFrame.width
+        
+        logger.info("🖥️ Creating taskbar on screen: \(screen.localizedName), width: \(screenWidth)", category: .taskbar)
         
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: screenWidth - 10, height: 42),
@@ -171,25 +258,36 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.collectionBehavior = [.stationary, .ignoresCycle]
         
         // Position at bottom of screen, full width
-        if let screen = NSScreen.main {
-            let screenFrame = screen.visibleFrame
-            let x = screenFrame.minX + 5
-            let y = screenFrame.minY + 5
-            window.setFrameOrigin(NSPoint(x: x, y: y))
-        }
+        let x = screenFrame.minX + 5
+        let y = screenFrame.minY + 5
+        window.setFrameOrigin(NSPoint(x: x, y: y))
         
         // Store window for this space
         dockWindows[currentSpaceID] = window
         
         // Show the window
         window.makeKeyAndOrderFront(nil)
-        logger.info("Created and showed taskbar window for space: \(currentSpaceID)", category: .taskbar)
+        logger.info("Created and showed taskbar window for space: \(currentSpaceID) on screen: \(screen.localizedName)", category: .taskbar)
         
         // Connect WindowManager to KeyboardSwitcher for real window data
         keyboardSwitcher.connectWindowManager(windowManager)
         
         // Set this as the active space
         currentActiveSpaceID = currentSpaceID
+    }
+    
+    private func getScreenWithMouseCursor() -> NSScreen? {
+        // Get the current mouse location
+        let mouseLocation = NSEvent.mouseLocation
+        
+        // Find the screen that contains the mouse cursor
+        for screen in NSScreen.screens {
+            if screen.frame.contains(mouseLocation) {
+                return screen
+            }
+        }
+        
+        return nil
     }
     
 
