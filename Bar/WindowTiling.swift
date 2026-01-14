@@ -77,6 +77,12 @@ class WindowTiling: ObservableObject {
             return
         }
 
+        // Only tile windows on the main screen
+        if !isWindowOnMainScreen(windowInfo.bounds) {
+            logger.info("🖥️ Skipping window tiling - window is on secondary screen: \(windowInfo.owner)", category: .windowTiling)
+            return
+        }
+
         // Calculate the ideal fullscreen bounds (respecting taskbar)
         guard let targetBounds = calculateFullscreenBounds() else {
             logger.warning("Cannot calculate fullscreen bounds for window tiling", category: .windowTiling)
@@ -487,6 +493,28 @@ class WindowTiling: ObservableObject {
     }
 
     // MARK: - Private Implementation
+
+    /// Check if a window is on the main screen
+    private func isWindowOnMainScreen(_ windowBounds: CGRect) -> Bool {
+        guard let mainScreen = NSScreen.main else {
+            logger.warning("Cannot get main screen for window screen detection", category: .windowTiling)
+            return true  // Fallback to allowing tiling if we can't determine screen
+        }
+
+        let mainScreenFrame = mainScreen.frame
+
+        // Check if the window's center point is within the main screen bounds
+        let windowCenter = CGPoint(
+            x: windowBounds.midX,
+            y: windowBounds.midY
+        )
+
+        let isOnMainScreen = mainScreenFrame.contains(windowCenter)
+
+        logger.debug("Window center: \(windowCenter), Main screen frame: \(mainScreenFrame), isOnMainScreen: \(isOnMainScreen)", category: .windowTiling)
+
+        return isOnMainScreen
+    }
 
     private func shouldSkipWindow(_ owner: String, _ bounds: CGRect) -> Bool {
         // Skip system apps and our own app
