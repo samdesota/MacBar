@@ -4,9 +4,8 @@
 I hate the dock. I think the taskbar concept from windows is objectively better. I'm not alone, there is existing software that ports this functionality to mac for example [here](https://lawand.io/taskbar/), but I wanted some specific features so I started vibe coding my own solution one day, and after a couple months of slow iteration this is what I use daily.
 
 At this point it is still pretty bug but it works well for enough for me. I don't have any other uses right, but maybe if I there's I will clean up some of the edge cases :)
-gi
 
-<video controls src="https://github.com/samdesota/MacBar/raw/refs/heads/main/demo.mp4" title="./demo.mp4"></video>
+https://github.com/user-attachments/assets/41f79a9c-c27b-4222-ac5e-e8e1456415cc
 
 ## Features
 
