@@ -6,7 +6,7 @@ I hate the dock. I think the taskbar concept from windows is objectively better.
 At this point it is still pretty bug but it works well for enough for me. I don't have any other uses right, but maybe if I there's I will clean up some of the edge cases :)
 gi
 
-![](./demo.mp4)
+https://github.com/samdesota/MacBar/raw/refs/heads/main/demo.mp4
 
 ## Features
 
