@@ -1,4 +1,4 @@
-# Bar - macOS Taskbar + Window Manager
+# MacBar - macOS Taskbar + Window Manager
 
 I hate the dock. I think the taskbar concept from windows is objectively better. I'm not alone, there is existing software that ports this functionality to mac for example [here](https://lawand.io/taskbar/), but I wanted some specific features so I started vibe coding my own solution one day, and after a couple months of slow iteration this is what I use daily.
 
