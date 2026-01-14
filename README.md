@@ -19,7 +19,7 @@ All keyboard shortcuts start with this `cmd`, after witch you enter `Bar` mode s
 - `cmd`, `.` remove a window from a split group
 - `cmd`, `delete`, `window key` To close a specific window
 - `cmd`, `shfit+delete`, To close all windows except the focused window
-- `cmd`, `delete`, `arrow left/right` To close all windows to the left/right if the focused window
+- `cmd`, `delete`, `arrow left/right` To close all windows to the left/right of the focused window
 
 ## Known issues
 
