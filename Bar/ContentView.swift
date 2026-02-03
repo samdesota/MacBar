@@ -469,7 +469,8 @@ struct WindowButton: View {
                     Image(nsImage: icon)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
-                        .frame(width: 20, height: 20)
+                        .frame(width: window.isFavicon ? 12 : 20, height: window.isFavicon ? 12 : 20)
+                        .padding(window.isFavicon ? 2 : 0)
                 } else {
                     Image(systemName: "app")
                         .font(.system(size: 16))

@@ -104,6 +104,9 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
     // Native desktop bridge for all low-level windowing operations
     private let nativeBridge = NativeDesktopBridge()
     
+    // Firefox favicon receiver for browser window icons
+    private var firefoxReceiver: FirefoxFaviconReceiver?
+    
     // Window tiling manager
     private var windowTiling: WindowTiling?
     
@@ -132,6 +135,21 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
     
     deinit {
         stopMonitoring()
+    }
+    
+    // MARK: - Firefox Integration
+    
+    func setFirefoxReceiver(_ receiver: FirefoxFaviconReceiver) {
+        self.firefoxReceiver = receiver
+        
+        // Set up callback to refresh window list when favicon is updated
+        receiver.onFaviconUpdated = { [weak self] in
+            guard let self = self else { return }
+            self.logger.info("🔔 Favicon updated, refreshing window list immediately", category: .windowManager)
+            self.updateWindowList()
+        }
+        
+        logger.info("🦊 Firefox favicon receiver connected to WindowManager", category: .windowManager)
     }
     
     func setupTaskbarPosition() {
@@ -439,11 +457,26 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
         var newWindowOrder: [CGWindowID] = []
         
         for nativeWindow in nativeWindows {
-            // Get app icon from bridge
-            let appIcon = nativeBridge.getAppIcon(for: nativeWindow.owner)
-            
-            // Try to get a better window title from bridge
+            // Try to get a better window title from bridge first
             let betterWindowName = nativeBridge.getWindowTitle(windowID: nativeWindow.windowID) ?? nativeWindow.name
+            
+            // Try to get Firefox favicon first if this is a Firefox window
+            var appIcon: NSImage? = nil
+            var isFavicon = false
+            if nativeWindow.owner == "Firefox", let receiver = firefoxReceiver {
+                appIcon = receiver.getFavicon(forWindowTitle: betterWindowName)
+                if appIcon != nil {
+                    isFavicon = true
+                    logger.debug("🦊 Using Firefox favicon for window '\(betterWindowName)'", category: .windowManager)
+                } else {
+                    logger.debug("🦊 No Firefox favicon match for window '\(betterWindowName)'", category: .windowManager)
+                }
+            }
+            
+            // Fall back to app icon if no Firefox favicon
+            if appIcon == nil {
+                appIcon = nativeBridge.getAppIcon(for: nativeWindow.owner)
+            }
             
             let windowInfo = WindowInfo(
                 id: nativeWindow.windowID,
@@ -451,7 +484,8 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
                 owner: nativeWindow.owner,
                 icon: appIcon,
                 isActive: isWindowActive(nativeWindow.windowID),
-                spaceID: nativeWindow.spaceID
+                spaceID: nativeWindow.spaceID,
+                isFavicon: isFavicon
             )
             
             // Add window if not already present
@@ -777,8 +811,9 @@ struct WindowInfo: Identifiable, Equatable {
     let isActive: Bool
     let forceShowTitle: Bool
     let spaceID: UInt64
+    let isFavicon: Bool
     
-    init(id: CGWindowID, name: String, owner: String, icon: NSImage?, isActive: Bool, forceShowTitle: Bool = false, spaceID: UInt64) {
+    init(id: CGWindowID, name: String, owner: String, icon: NSImage?, isActive: Bool, forceShowTitle: Bool = false, spaceID: UInt64, isFavicon: Bool = false) {
         self.id = id
         self.name = name
         self.owner = owner
@@ -786,6 +821,7 @@ struct WindowInfo: Identifiable, Equatable {
         self.isActive = isActive
         self.forceShowTitle = forceShowTitle
         self.spaceID = spaceID
+        self.isFavicon = isFavicon
     }
     
     var displayName: String {

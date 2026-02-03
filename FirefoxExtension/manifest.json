@@ -1,0 +1,17 @@
+{
+  "manifest_version": 2,
+  "name": "Bar Favicon Bridge",
+  "version": "0.1.0",
+  "description": "Emits windowId, url, favicon for the active tab via native messaging.",
+  "applications": {
+    "gecko": {
+      "id": "bar-favicon-bridge@bar.local",
+      "strict_min_version": "109.0"
+    }
+  },
+  "permissions": ["tabs", "nativeMessaging"],
+  "background": {
+    "scripts": ["background.js"],
+    "persistent": true
+  }
+}

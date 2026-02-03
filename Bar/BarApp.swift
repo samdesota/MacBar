@@ -32,6 +32,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let keyboardPermissionManager = KeyboardPermissionManager.shared
     private let spaceManager = SpaceManager.shared
     private let windowManager = WindowManager() // Single WindowManager instance
+    private let firefoxReceiver = FirefoxFaviconReceiver() // Firefox favicon bridge
     private var cancellables = Set<AnyCancellable>()
     private var currentActiveSpaceID: String = ""
     private var screenChangeObserver: NSObjectProtocol?
@@ -197,6 +198,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     func createDockWindow() {
         logger.info("Creating initial taskbar window", category: .taskbar)
+        
+        // Connect Firefox receiver to WindowManager
+        windowManager.setFirefoxReceiver(firefoxReceiver)
         
         // Start keyboard switching functionality after window is created
         initializeKeyboardSwitching()

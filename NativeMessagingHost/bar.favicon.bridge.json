@@ -1,0 +1,7 @@
+{
+  "name": "bar.favicon.bridge",
+  "description": "Bar Firefox favicon bridge",
+  "path": "/Users/sam/d/Bar/NativeMessagingHost/bar_favicon_host.js",
+  "type": "stdio",
+  "allowed_extensions": ["bar-favicon-bridge@bar.local"]
+}
