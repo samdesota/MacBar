@@ -8,6 +8,7 @@
 import SwiftUI
 import AppKit
 import Combine
+import ServiceManagement
 
 
 
@@ -27,6 +28,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var windowScreenMap: [String: NSScreen] = [:] // Space ID -> Screen mapping
     var permissionWindow: NSWindow?
     var settingsWindow: NSWindow?
+    var statusItem: NSStatusItem?
     private let logger = Logger.shared
     private let keyboardSwitcher = KeyboardSwitcher.shared
     private let keyboardPermissionManager = KeyboardPermissionManager.shared
@@ -43,8 +45,85 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Hide app from dock
         NSApp.setActivationPolicy(.accessory)
         
+        setupStatusBarItem()
         checkPermissionsAndSetup()
         setupNotificationObservers()
+    }
+
+    private func setupStatusBarItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        if let button = item.button {
+            let image = NSImage(systemSymbolName: "rectangle.bottomthird.inset.filled",
+                                accessibilityDescription: "Bar")
+            image?.isTemplate = true
+            button.image = image
+        }
+
+        let menu = NSMenu()
+
+        let restartItem = NSMenuItem(title: "Restart Bar",
+                                     action: #selector(restartApp),
+                                     keyEquivalent: "r")
+        restartItem.target = self
+        menu.addItem(restartItem)
+
+        let settingsItem = NSMenuItem(title: "Settings…",
+                                      action: #selector(openSettingsWindow),
+                                      keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+
+        menu.addItem(.separator())
+
+        let launchItem = NSMenuItem(title: "Launch at Login",
+                                    action: #selector(toggleLaunchAtLogin(_:)),
+                                    keyEquivalent: "")
+        launchItem.target = self
+        launchItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        menu.addItem(launchItem)
+
+        menu.addItem(.separator())
+
+        let quitItem = NSMenuItem(title: "Quit Bar",
+                                  action: #selector(NSApplication.terminate(_:)),
+                                  keyEquivalent: "q")
+        menu.addItem(quitItem)
+
+        item.menu = menu
+        self.statusItem = item
+    }
+
+    @objc private func restartApp() {
+        let bundlePath = Bundle.main.bundlePath
+        let escaped = bundlePath.replacingOccurrences(of: "'", with: "'\\''")
+        let task = Process()
+        task.launchPath = "/bin/sh"
+        task.arguments = ["-c", "sleep 0.5 && /usr/bin/open -n '\(escaped)'"]
+        do {
+            try task.run()
+            logger.info("🔄 Restarting Bar from \(bundlePath)", category: .general)
+        } catch {
+            logger.error("Failed to spawn restart task: \(error.localizedDescription)", category: .general)
+            return
+        }
+        NSApp.terminate(nil)
+    }
+
+    @objc private func toggleLaunchAtLogin(_ sender: NSMenuItem) {
+        let service = SMAppService.mainApp
+        do {
+            if service.status == .enabled {
+                try service.unregister()
+                sender.state = .off
+                logger.info("Unregistered launch at login", category: .general)
+            } else {
+                try service.register()
+                sender.state = .on
+                logger.info("Registered launch at login", category: .general)
+            }
+        } catch {
+            logger.error("Failed to toggle launch at login: \(error.localizedDescription)", category: .general)
+        }
     }
     
     deinit {

@@ -46,8 +46,6 @@ struct TaskbarView: View {
     @ObservedObject var windowManager: WindowManager
     @ObservedObject var keyboardSwitcher: KeyboardSwitcher
     @StateObject private var logger = Logger.shared
-    @State private var showLogControls = false
-    @State private var showSettings = false
     @State private var draggedWindowID: CGWindowID?
     @State private var dragOffset: CGSize = .zero
     @State private var draggedWindowIndex: Int?
@@ -303,39 +301,6 @@ struct TaskbarView: View {
                 }
                 
                 Spacer()
-                
-                // Logging control button
-                Button(action: {
-                    showLogControls.toggle()
-                }) {
-                    Image(systemName: "terminal")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
-                        .frame(width: 24, height: 24)
-                        .background(
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(showLogControls ? Color.accentColor.opacity(0.2) : Color.clear)
-                        )
-                }
-                .buttonStyle(PlainButtonStyle())
-                .help("Toggle logging controls")
-                
-                // Settings button
-                Button(action: {
-                    showSettings.toggle()
-                    openSettingsWindow()
-                }) {
-                    Image(systemName: "gearshape.fill")
-                        .font(.system(size: 14))
-                        .foregroundColor(.primary)
-                        .frame(width: 32, height: 32)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6)
-                                .fill(Color.clear)
-                        )
-                }
-                .buttonStyle(PlainButtonStyle())
-                .help("Open Settings")
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
@@ -345,47 +310,6 @@ struct TaskbarView: View {
                     .shadow(color: .black.opacity(0.2), radius: 5, x: 0, y: 2)
             )
             .frame(height: 42)
-            
-            // Logging controls overlay
-            if showLogControls {
-                VStack {
-                    Spacer()
-                    
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Logging Controls")
-                            .font(.caption)
-                            .fontWeight(.bold)
-                            .foregroundColor(.primary)
-                        
-                        ForEach(Logger.LogCategory.allCases, id: \.self) { category in
-                            HStack {
-                                Button(action: {
-                                    logger.toggleCategory(category)
-                                }) {
-                                    Image(systemName: logger.isEnabled(category) ? "checkmark.square.fill" : "square")
-                                        .foregroundColor(logger.isEnabled(category) ? .green : .secondary)
-                                        .font(.system(size: 10))
-                                }
-                                .buttonStyle(PlainButtonStyle())
-                                
-                                Text(category.rawValue)
-                                    .font(.caption2)
-                                    .foregroundColor(.primary)
-                                
-                                Spacer()
-                            }
-                        }
-                    }
-                    .padding(8)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(.ultraThinMaterial)
-                            .shadow(color: .black.opacity(0.3), radius: 8, x: 0, y: 4)
-                    )
-                    .padding(.horizontal, 8)
-                    .padding(.bottom, 50)
-                }
-            }
         }
         .onPreferenceChange(WindowSizePreferenceKey.self) { sizes in
             let previousCount = windowWidths.count
@@ -403,11 +327,6 @@ struct TaskbarView: View {
             
             windowWidths = sizes
         }
-    }
-    
-    private func openSettingsWindow() {
-        // Post notification to AppDelegate to create settings window
-        NotificationCenter.default.post(name: NSNotification.Name("OpenSettings"), object: nil)
     }
     
     private func moveWindow(from source: IndexSet, to destination: Int) {
