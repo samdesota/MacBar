@@ -24,9 +24,13 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
     private let logger = Logger.shared
     private let spaceManager = SpaceManager.shared
     private var cancellables = Set<AnyCancellable>()
+    private let backgroundQueue = DispatchQueue(label: "com.bar.window-manager", qos: .userInitiated)
     
     // Space-based window tracking
     private var currentActiveSpaceID: UInt64 = 0
+
+    // Custom window names (windowID -> custom name)
+    private var customWindowNames: [CGWindowID: String] = [:]
     
     // Window cache to avoid duplicate bridge calls
     private struct WindowCache {
@@ -199,17 +203,38 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
         updateWindowList()
         
         // Set up timer for periodic updates (safety net only - window observers handle real-time updates)
+        // The timer fires on main but dispatches AX-heavy work to a background queue
+        // so unresponsive apps don't freeze the UI.
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             self.checkAccessibilityPermission()
-            self.updateWindowList() // Full window list refresh every 10 seconds as safety net
-            self.windowTiling?.preventTaskbarOverlap() // Now handled by WindowTiling
-            self.windowTiling?.rebalanceSplitViews() // Rebalance split view sizing based on user changes
-            self.windowTiling?.clearOldRestrictions() // Clean up old size restriction records
-            
-            // Clean up split groups for windows that no longer exist
-            let currentWindowIDs = Set((self.spaceWindows[self.currentActiveSpaceID] ?? []).map { $0.id })
-            self.windowTiling?.cleanupSplitGroups(availableWindowIDs: currentWindowIDs)
+
+            self.backgroundQueue.async { [weak self] in
+                guard let self = self else { return }
+                self.updateWindowList()
+                self.windowTiling?.preventTaskbarOverlap()
+                self.windowTiling?.rebalanceSplitViews()
+                self.windowTiling?.clearOldRestrictions()
+
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
+                    // Clean up split groups for windows that no longer exist
+                    let currentWindowIDs = Set((self.spaceWindows[self.currentActiveSpaceID] ?? []).map { $0.id })
+                    self.windowTiling?.cleanupSplitGroups(availableWindowIDs: currentWindowIDs)
+
+                    // Clean up custom names — check all spaces, not just current
+                    if !self.customWindowNames.isEmpty {
+                        let allWindowIDs = Set(self.spaceWindows.values.flatMap { $0 }.map { $0.id })
+                        let removed = self.customWindowNames.filter { !allWindowIDs.contains($0.key) }
+                        if !removed.isEmpty {
+                            for (id, name) in removed {
+                                self.logger.info("🗑️ Removing custom name '\(name)' for window \(id) — not found in any space (spaces: \(self.spaceWindows.keys.sorted()), allWindowIDs count: \(allWindowIDs.count))", category: .windowManager)
+                            }
+                        }
+                        self.customWindowNames = self.customWindowNames.filter { allWindowIDs.contains($0.key) }
+                    }
+                }
+            }
         }
         
         // Refresh observers after a delay to ensure everything is set up properly
@@ -334,6 +359,33 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
         }
     }
     
+    /// Tile the currently focused window to fullscreen (manual user action)
+    func tileCurrentWindowToFullscreen() {
+        guard let focusedWindowID = nativeBridge.getFocusedWindowID() else {
+            logger.warning("No focused window to tile to fullscreen", category: .windowManager)
+            return
+        }
+        
+        logger.info("🔲 Tiling focused window \(focusedWindowID) to fullscreen", category: .windowManager)
+        windowTiling?.tileWindowToFullscreen(windowID: focusedWindowID)
+    }
+    
+    /// Set a custom name for a window
+    func nameWindow(windowID: CGWindowID?, name: String) {
+        let targetID: CGWindowID
+        if let windowID = windowID {
+            targetID = windowID
+        } else if let focusedID = nativeBridge.getFocusedWindowID() {
+            targetID = focusedID
+        } else {
+            logger.warning("No window ID provided and no focused window", category: .windowManager)
+            return
+        }
+        customWindowNames[targetID] = name
+        logger.info("Named window \(targetID) as '\(name)'", category: .windowManager)
+        updateWindowList()
+    }
+
     /// Handle focus change for split window synchronization
     private func handleFocusChangeForSplitSync(windowID: CGWindowID?) {
         windowTiling?.handleWindowFocusChanged(focusedWindowID: windowID)
@@ -351,15 +403,19 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
     func onFrontmostAppChanged(app: NSRunningApplication?) {
         let appName = app?.localizedName ?? "None"
         logger.info("🎯 App changed to: \(appName)", category: .focusSwitching)
-        updateWindowFocusStatus()
+        backgroundQueue.async { [weak self] in
+            self?.updateWindowFocusStatus()
+        }
     }
-    
+
     func onWindowListChanged() {
         logger.info("📋 Window list changed", category: .windowManager)
         // Invalidate both caches since window list changed
         windowCache = nil
         invalidateSpaceCache()
-        updateWindowList()
+        backgroundQueue.async { [weak self] in
+            self?.updateWindowList()
+        }
     }
     
     func onAppLaunched(app: NSRunningApplication) {
@@ -416,7 +472,8 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
                 icon: window.icon,
                 isActive: isNowActive,
                 forceShowTitle: window.forceShowTitle,
-                spaceID: window.spaceID
+                spaceID: window.spaceID,
+                customName: window.customName
             )
         }
         
@@ -523,6 +580,10 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
 
         let activeSpaceId = self.currentActiveSpaceID
 
+        // Resolve focused window ID here (off main thread) so the AX call
+        // doesn't block the UI if an app is unresponsive.
+        let currentFocusedID = self.nativeBridge.getFocusedWindowID()
+
         DispatchQueue.main.async {
             if activeSpaceId != self.currentActiveSpaceID {
                 self.logger.info("🎨 Skipping update for space \(self.currentActiveSpaceID) because it's not the active space", category: .windowManager)
@@ -530,14 +591,13 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
             }
 
             self.logger.info("🎨 Updating space \(self.currentActiveSpaceID) windows: \(currentSpaceWindows.count) windows using space-specific API", category: .windowManager)
-            
+
             // Only update the windows for the current active space, leave other spaces alone
             self.spaceWindows[self.currentActiveSpaceID] = currentSpaceWindows
-            
+
             self.debugInfo = "Found \(currentSpaceWindows.count) windows for current space \(self.currentActiveSpaceID)"
-            
+
             // Debug: Show each window ID and focus status
-            let currentFocusedID = self.nativeBridge.getFocusedWindowID()
             self.logger.info("🔎 Current focused window ID: \(currentFocusedID ?? 0)", category: .windowManager)
             self.logger.info("📋 Window list for space \(self.currentActiveSpaceID):", category: .windowManager)
             for window in currentSpaceWindows {
@@ -545,7 +605,7 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
                 let focusEmoji = isFocused ? "🔥" : "😴"
                 self.logger.info("  \(focusEmoji) ID: \(window.id), Name: \(window.displayName), Owner: \(window.owner), Space: space-\(window.spaceID), IsActive: \(window.isActive), ShouldBeFocused: \(isFocused)", category: .windowManager)
             }
-            
+
             self.logger.info("✅ Window list update completed for space \(self.currentActiveSpaceID)", category: .windowManager)
         }
     }
@@ -653,7 +713,8 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
                 icon: window.icon,
                 isActive: window.isActive,
                 forceShowTitle: hasMultipleWindows,
-                spaceID: window.spaceID
+                spaceID: window.spaceID,
+                customName: customWindowNames[window.id]
             )
             
             updatedWindows.append(updatedWindow)
@@ -801,6 +862,26 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
             closeWindow(window)
         }
     }
+    
+    // MARK: - Screen Movement
+    
+    /// Move the focused window to a screen in the specified direction
+    func moveFocusedWindowToScreen(direction: ScreenDirection) {
+        guard let focusedWindowID = nativeBridge.getFocusedWindowID() else {
+            logger.warning("No focused window to move to screen", category: .windowManager)
+            return
+        }
+        
+        logger.info("🖥️ Moving focused window \(focusedWindowID) to screen in direction: \(direction.rawValue)", category: .windowManager)
+        nativeBridge.moveWindowToScreen(windowID: focusedWindowID, direction: direction)
+    }
+}
+
+enum ScreenDirection: String {
+    case left = "left"
+    case right = "right"
+    case up = "up"
+    case down = "down"
 }
 
 struct WindowInfo: Identifiable, Equatable {
@@ -813,7 +894,7 @@ struct WindowInfo: Identifiable, Equatable {
     let spaceID: UInt64
     let isFavicon: Bool
     
-    init(id: CGWindowID, name: String, owner: String, icon: NSImage?, isActive: Bool, forceShowTitle: Bool = false, spaceID: UInt64, isFavicon: Bool = false) {
+    init(id: CGWindowID, name: String, owner: String, icon: NSImage?, isActive: Bool, forceShowTitle: Bool = false, spaceID: UInt64, isFavicon: Bool = false, customName: String? = nil) {
         self.id = id
         self.name = name
         self.owner = owner
@@ -822,26 +903,25 @@ struct WindowInfo: Identifiable, Equatable {
         self.forceShowTitle = forceShowTitle
         self.spaceID = spaceID
         self.isFavicon = isFavicon
+        self.customName = customName
     }
     
+    let customName: String?
+
     var displayName: String {
-        // If forceShowTitle is true (multiple windows from same app), always try to show window title
-        if forceShowTitle {
-            if !name.isEmpty && name != owner {
-                // Truncate long window titles
-                let maxLength = 50
-                if name.count > maxLength {
-                    return String(name.prefix(maxLength)) + "..."
-                }
-                return name
-            } else {
-                // Even with forceShowTitle, if no meaningful title, show app name with index
-                return owner
-            }
-        } else {
-            // Single window - just show app name for simplicity
-            return owner
+        // Custom name takes priority
+        if let customName = customName, !customName.isEmpty {
+            return customName
         }
+        // Always show window title when available
+        if !name.isEmpty && name != owner {
+            let maxLength = 50
+            if name.count > maxLength {
+                return String(name.prefix(maxLength)) + "..."
+            }
+            return name
+        }
+        return owner
     }
     
     static func == (lhs: WindowInfo, rhs: WindowInfo) -> Bool {

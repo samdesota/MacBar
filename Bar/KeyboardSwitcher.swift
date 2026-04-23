@@ -264,7 +264,14 @@ class KeyboardSwitcher: ObservableObject {
         // Check if this was a short tap without other keys
         if !isModifierCombination && pressDuration <= maxCommandKeyTapDuration {
             logger.info("Command key tap detected! Duration: \(String(format: "%.3f", pressDuration * 1000))ms", category: .keyboardSwitching)
-            activateSwitchingMode()
+            
+            // If already in switching mode, tile focused window to fullscreen
+            if isSwitchingMode {
+                triggerFullscreenTiling()
+            } else {
+                // First tap - activate switching mode
+                activateSwitchingMode()
+            }
         } else if isModifierCombination {
             logger.debug("Ignoring command key release - was part of combination", category: .keyboardSwitching)
         } else {
@@ -410,6 +417,25 @@ class KeyboardSwitcher: ObservableObject {
         }
         
         // Deactivate switching mode
+        deactivateSwitchingMode()
+    }
+    
+    // MARK: - Fullscreen Tiling
+    
+    /// Trigger fullscreen tiling for the focused window (triggered by Command tap during switching mode)
+    private func triggerFullscreenTiling() {
+        logger.info("🔲 Command tap in switching mode - tiling focused window to fullscreen", category: .keyboardSwitching)
+        
+        if let windowManager = windowManager {
+            windowManager.tileCurrentWindowToFullscreen()
+        } else {
+            logger.warning("Cannot tile to fullscreen - WindowManager not connected", category: .keyboardSwitching)
+            DispatchQueue.main.async {
+                self.lastError = "Cannot tile to fullscreen - WindowManager not available"
+            }
+        }
+        
+        // Deactivate switching mode after tiling
         deactivateSwitchingMode()
     }
     
@@ -614,8 +640,40 @@ class KeyboardSwitcher: ObservableObject {
             logger.debug("Consuming keyUp event during switching mode: keyCode \(keyCode)", category: .keyboardSwitching)
             
         case .flagsChanged:
-            // Log modifier changes but don't process them for switching logic
+            // Handle Command key detection during switching mode
             let flags = event.flags
+            let isCommandPressed = flags.contains(.maskCommand)
+            
+            // Detect Command key release (tap) during switching mode
+            if !isCommandPressed && isCommandKeyDown {
+                // Command key was just released
+                logger.info("Command key released during switching mode - checking for tap", category: .keyboardSwitching)
+                
+                if let downTime = commandKeyDownTime {
+                    let pressDuration = Date().timeIntervalSince(downTime)
+                    logger.debug("Command key press duration in switching mode: \(String(format: "%.3f", pressDuration * 1000))ms", category: .keyboardSwitching)
+                    
+                    // Check if this was a short tap without other keys
+                    if !isModifierCombination && pressDuration <= maxCommandKeyTapDuration {
+                        logger.info("🔲 Command tap detected in switching mode - triggering fullscreen tiling", category: .keyboardSwitching)
+                        // Trigger fullscreen tiling on main thread
+                        DispatchQueue.main.async {
+                            self.triggerFullscreenTiling()
+                        }
+                    }
+                }
+                
+                isCommandKeyDown = false
+                commandKeyDownTime = nil
+                isModifierCombination = false
+            } else if isCommandPressed && !isCommandKeyDown {
+                // Command key was just pressed
+                logger.debug("Command key pressed during switching mode", category: .keyboardSwitching)
+                isCommandKeyDown = true
+                isModifierCombination = false
+                commandKeyDownTime = Date()
+            }
+            
             logger.debug("Consuming flagsChanged event during switching mode: flags \(flags)", category: .keyboardSwitching)
             
         default:
@@ -682,8 +740,37 @@ class KeyboardSwitcher: ObservableObject {
         }
     }
     
-    /// Handle special keys (/, Enter, Escape, Backspace) during switching mode
+    /// Handle special keys (/, Enter, Escape, Backspace, hjkl) during switching mode
     private func handleSpecialKeys(keyString: String, keyCode: UInt16, modifierFlags: NSEvent.ModifierFlags) -> Bool {
+        // Handle h, j, k, l keys for screen movement
+        if keyCode == 4 { // h key - move left
+            logger.info("Moving window to screen on the left via 'h'", category: .keyboardSwitching)
+            windowManager?.moveFocusedWindowToScreen(direction: .left)
+            resetSwitchingModeTimer()
+            return true
+        }
+        
+        if keyCode == 38 { // j key - move down
+            logger.info("Moving window to screen below via 'j'", category: .keyboardSwitching)
+            windowManager?.moveFocusedWindowToScreen(direction: .down)
+            resetSwitchingModeTimer()
+            return true
+        }
+        
+        if keyCode == 40 { // k key - move up
+            logger.info("Moving window to screen above via 'k'", category: .keyboardSwitching)
+            windowManager?.moveFocusedWindowToScreen(direction: .up)
+            resetSwitchingModeTimer()
+            return true
+        }
+        
+        if keyCode == 37 { // l key - move right
+            logger.info("Moving window to screen on the right via 'l'", category: .keyboardSwitching)
+            windowManager?.moveFocusedWindowToScreen(direction: .right)
+            resetSwitchingModeTimer()
+            return true
+        }
+        
         // Handle "/" key to enter split selection mode
         if keyCode == 44 { // "/" key
             if !isSplitSelectionMode && !isCloseMode {

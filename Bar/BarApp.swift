@@ -36,6 +36,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables = Set<AnyCancellable>()
     private var currentActiveSpaceID: String = ""
     private var screenChangeObserver: NSObjectProtocol?
+    private var appActivationObserver: NSObjectProtocol?
+    private var reconcileTimer: Timer?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Hide app from dock
@@ -46,10 +48,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     deinit {
-        // Clean up screen change observer
         if let observer = screenChangeObserver {
             NotificationCenter.default.removeObserver(observer)
         }
+        if let observer = appActivationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+        reconcileTimer?.invalidate()
     }
     
     func setupNotificationObservers() {
@@ -68,6 +73,39 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] notification in
             self?.handleScreenParametersChanged()
         }
+        
+        // Observe CLI commands via DistributedNotificationCenter
+        setupCLINotificationObservers()
+    }
+    
+    private func setupCLINotificationObservers() {
+        let center = DistributedNotificationCenter.default()
+        
+        center.addObserver(
+            forName: Notification.Name("com.bar.cli.fullscreen"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.logger.info("📟 CLI: received fullscreen command", category: .windowManager)
+            self?.windowManager.tileCurrentWindowToFullscreen()
+        }
+
+        center.addObserver(
+            forName: Notification.Name("com.bar.cli.name-window"),
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let userInfo = notification.userInfo,
+                  let name = userInfo["name"] as? String else {
+                self?.logger.warning("📟 CLI: name-window missing 'name' parameter", category: .windowManager)
+                return
+            }
+            let windowID = (userInfo["windowID"] as? String).flatMap { UInt32($0) }.map { CGWindowID($0) }
+            self?.logger.info("📟 CLI: received name-window command (id=\(windowID ?? 0), name='\(name)')", category: .windowManager)
+            self?.windowManager.nameWindow(windowID: windowID, name: name)
+        }
+
+        logger.info("✅ CLI notification observers registered", category: .windowManager)
     }
     
     @objc func openSettingsWindow() {
@@ -95,11 +133,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     func handleScreenParametersChanged() {
         logger.info("🖥️ Screen parameters changed - updating taskbar windows", category: .taskbar)
-        
+
         // Update all existing taskbar windows to match their screen's current resolution
         for (spaceID, window) in dockWindows {
             updateTaskbarWindowSize(for: spaceID, window: window)
         }
+
+        // Also reconcile in case a display change implies a new active space.
+        reconcileTaskbars()
     }
     
     func updateTaskbarWindowSize(for spaceID: String, window: NSWindow) {
@@ -198,86 +239,127 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     func createDockWindow() {
         logger.info("Creating initial taskbar window", category: .taskbar)
-        
+
         // Connect Firefox receiver to WindowManager
         windowManager.setFirefoxReceiver(firefoxReceiver)
-        
+
         // Start keyboard switching functionality after window is created
         initializeKeyboardSwitching()
-        
-        // Create initial taskbar window for current space
-        createTaskbarWindowForCurrentSpace()
-        
-        // Set up space change observer to create windows for new spaces
-        setupSpaceChangeObserver()
+
+        // Wire up reconciliation triggers and run an initial pass.
+        setupReconciliationTriggers()
+        reconcileTaskbars()
     }
-    
-    private func createTaskbarWindowForCurrentSpace() {
-        let currentSpaceID = spaceManager.currentSpaceID.isEmpty ? "space-0" : spaceManager.currentSpaceID
-        
-        // Check if we already have a window for this space
-        if dockWindows[currentSpaceID] != nil {
-            logger.info("Taskbar window already exists for space: \(currentSpaceID)", category: .taskbar)
+
+    // MARK: - Reconciliation (idempotent, source-of-truth driven)
+
+    /// Wires up every signal that should trigger a reconcile. All triggers converge on
+    /// `reconcileTaskbars()`, which is idempotent and reads the active space directly from SLS
+    /// (bypassing @Published willSet timing).
+    private func setupReconciliationTriggers() {
+        // 1. SpaceManager's existing change detector (private API poll + workspace notification).
+        spaceManager.onSpaceChangeDetected = { [weak self] in
+            self?.reconcileTaskbars()
+            // Brief retry burst — handles cases where SLS hasn't fully transitioned yet
+            // or the target screen isn't ready on the first call.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self?.reconcileTaskbars() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self?.reconcileTaskbars() }
+        }
+
+        // 2. App activation — covers cases where space changed but our hooks missed it.
+        appActivationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.reconcileTaskbars()
+        }
+
+        // 3. Periodic safety net — guarantees self-healing within 1s of any missed event.
+        reconcileTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.reconcileTaskbars()
+        }
+    }
+
+    /// Idempotent: ensures the active space has a taskbar, garbage-collects stale ones.
+    /// Safe to call from any thread/context, any number of times.
+    private func reconcileTaskbars() {
+        guard let activeSpaceID = spaceManager.liveActiveSpaceID() else {
+            logger.warning("⚠️ reconcile: no active space from SLS", category: .taskbar)
             return
         }
-        
-        logger.info("Creating taskbar window for space: \(currentSpaceID)", category: .taskbar)
-        
-        // Use the single WindowManager instance
-        let windowManager = self.windowManager
-        
-        let contentView = NSHostingView(rootView: ContentView(spaceID: currentSpaceID).environmentObject(windowManager))
-        
-        // Determine which screen to use - prefer the screen with the mouse cursor
-        let targetScreen = getScreenWithMouseCursor() ?? NSScreen.main ?? NSScreen.screens.first
-        
-        guard let screen = targetScreen else {
-            logger.warning("⚠️ No screen available for taskbar window", category: .taskbar)
-            return
+
+        // Update active-space tracking + WindowManager (idempotent — only logs/updates on change).
+        if currentActiveSpaceID != activeSpaceID {
+            logger.info("🔄 reconcile: active space \(currentActiveSpaceID) → \(activeSpaceID)", category: .spaceManagement)
+            currentActiveSpaceID = activeSpaceID
+            if let raw = UInt64(activeSpaceID.replacingOccurrences(of: "space-", with: "")) {
+                windowManager.updateCurrentSpace(raw)
+            }
         }
-        
-        // Store the screen mapping
-        windowScreenMap[currentSpaceID] = screen
-        
-        // Get screen width to make taskbar full width
+
+        // Ensure a taskbar exists for the active space (unless it's a fullscreen space).
+        if spaceManager.liveIsFullScreen(spaceIDString: activeSpaceID) {
+            logger.debug("🚫 reconcile: \(activeSpaceID) is fullscreen, no taskbar", category: .taskbar)
+        } else {
+            ensureTaskbar(for: activeSpaceID)
+        }
+
+        // Garbage-collect taskbars for spaces that no longer exist.
+        let managed = spaceManager.liveManagedSpaceIDs()
+        if !managed.isEmpty {
+            for staleID in dockWindows.keys where !managed.contains(staleID) {
+                logger.info("🗑 reconcile: removing stale taskbar for \(staleID)", category: .taskbar)
+                dockWindows[staleID]?.close()
+                dockWindows.removeValue(forKey: staleID)
+                windowScreenMap.removeValue(forKey: staleID)
+            }
+        }
+    }
+
+    /// Idempotent taskbar creation. Returns true if a window exists (or was just created) for `spaceID`.
+    /// If no screen is available yet, schedules a retry instead of giving up.
+    @discardableResult
+    private func ensureTaskbar(for spaceID: String) -> Bool {
+        if dockWindows[spaceID] != nil { return true }
+
+        guard let screen = getScreenWithMouseCursor() ?? NSScreen.main ?? NSScreen.screens.first else {
+            logger.warning("⚠️ ensureTaskbar(\(spaceID)): no screen available, will retry via reconcile timer", category: .taskbar)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                self?.reconcileTaskbars()
+            }
+            return false
+        }
+
+        logger.info("🆕 Creating taskbar for \(spaceID) on \(screen.localizedName)", category: .taskbar)
+
+        let contentView = NSHostingView(rootView: ContentView(spaceID: spaceID).environmentObject(windowManager))
+        windowScreenMap[spaceID] = screen
+
         let screenFrame = screen.visibleFrame
-        let screenWidth = screenFrame.width
-        
-        logger.info("🖥️ Creating taskbar on screen: \(screen.localizedName), width: \(screenWidth)", category: .taskbar)
-        
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: screenWidth - 10, height: 42),
+            contentRect: NSRect(x: 0, y: 0, width: screenFrame.width - 10, height: 42),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
         )
-        
         window.contentView = contentView
         window.backgroundColor = NSColor.clear
         window.isOpaque = false
         window.hasShadow = false
         window.level = .floating
-        
-        // Set collection behavior to NOT join all spaces - this makes it space-specific
+        // Stationary so the window stays bound to whichever space is active when it's first shown.
         window.collectionBehavior = [.stationary, .ignoresCycle]
-        
-        // Position at bottom of screen, full width
-        let x = screenFrame.minX + 5
-        let y = screenFrame.minY + 5
-        window.setFrameOrigin(NSPoint(x: x, y: y))
-        
-        // Store window for this space
-        dockWindows[currentSpaceID] = window
-        
-        // Show the window
-        window.makeKeyAndOrderFront(nil)
-        logger.info("Created and showed taskbar window for space: \(currentSpaceID) on screen: \(screen.localizedName)", category: .taskbar)
-        
-        // Connect WindowManager to KeyboardSwitcher for real window data
+        window.setFrameOrigin(NSPoint(x: screenFrame.minX + 5, y: screenFrame.minY + 5))
+
+        dockWindows[spaceID] = window
+        // orderFrontRegardless avoids the canBecomeKeyWindow warning we were seeing.
+        window.orderFrontRegardless()
+
+        // Wire keyboard switcher to the WindowManager (idempotent connect).
         keyboardSwitcher.connectWindowManager(windowManager)
-        
-        // Set this as the active space
-        currentActiveSpaceID = currentSpaceID
+
+        return true
     }
     
     private func getScreenWithMouseCursor() -> NSScreen? {
@@ -295,41 +377,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
 
-    
-    private func setupSpaceChangeObserver() {
-        // Observe space changes to update the WindowManager
-        spaceManager.$currentSpaceID
-            .sink { [weak self] newSpaceID in
-                self?.handleSpaceChange(newSpaceID)
-            }
-            .store(in: &cancellables)
-    }
-    
-    private func handleSpaceChange(_ newSpaceID: String) {
-        logger.info("🔄 Space change detected: \(newSpaceID)", category: .spaceManagement)
-        
-        // Update current active space
-        currentActiveSpaceID = newSpaceID
-        
-        // Update the WindowManager with the new space ID
-        if let spaceID = UInt64(newSpaceID.replacingOccurrences(of: "space-", with: "")) {
-            windowManager.updateCurrentSpace(spaceID)
-        }
-        
-        // Check if we should show taskbar on this space
-        if !spaceManager.shouldShowTaskbarOnCurrentSpace() {
-            logger.info("🚫 Skipping taskbar on full screen space", category: .spaceManagement)
-            return
-        }
-        
-        // Check if we need to create a taskbar window for this space
-        if dockWindows[newSpaceID] == nil {
-            logger.info("🆕 Creating new taskbar window for space: \(newSpaceID)", category: .spaceManagement)
-            createTaskbarWindowForCurrentSpace()
-        } else {
-            logger.info("✅ Taskbar window already exists for space: \(newSpaceID)", category: .spaceManagement)
-        }
-    }
     
     private func initializeKeyboardSwitching() {
         logger.info("Initializing keyboard switching functionality", category: .keyboardSwitching)

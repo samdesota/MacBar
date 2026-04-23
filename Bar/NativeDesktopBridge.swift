@@ -64,6 +64,9 @@ class NativeDesktopBridge: ObservableObject {
     private var cachedFocusedApp: NSRunningApplication?
     private var lastFocusCheckTime: Date = Date()
     private let focusCacheTimeout: TimeInterval = 0.1 // 100ms
+
+    // AX timeout to prevent blocking when apps are unresponsive (seconds)
+    private let axTimeout: Float = 1.5
     
     init() {
         logger.info("🌉 NativeDesktopBridge initialized", category: .nativeBridge)
@@ -305,9 +308,9 @@ class NativeDesktopBridge: ObservableObject {
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(validObserver), .defaultMode)
         logger.debug("📡 Added observer to run loop for \(appName)", category: .nativeBridge)
         
-        // Get the application AX element
-        let axApp = AXUIElementCreateApplication(pid)
-        
+        // Get the application AX element with timeout
+        let axApp = axAppElement(for: pid)
+
         // Add observers for window events
         let notifications = [
             kAXWindowCreatedNotification,
@@ -730,8 +733,8 @@ class NativeDesktopBridge: ObservableObject {
     
     private func getAXFocusedWindowID(frontmostApp: NSRunningApplication) -> CGWindowID? {
         guard hasAccessibilityPermission else { return nil }
-        
-        let axApp = AXUIElementCreateApplication(frontmostApp.processIdentifier)
+
+        let axApp = axAppElement(for: frontmostApp.processIdentifier)
         
         var focusedElement: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &focusedElement)
@@ -847,6 +850,143 @@ class NativeDesktopBridge: ObservableObject {
         } else {
             return .failed(getAXErrorMessage(result))
         }
+    }
+    
+    func moveWindowToScreen(windowID: CGWindowID, direction: ScreenDirection) {
+        guard hasAccessibilityPermission else {
+            logger.warning("No accessibility permission for moving window to screen", category: .nativeBridge)
+            return
+        }
+        
+        // Get current window bounds
+        guard let currentBounds = getWindowBounds(windowID: windowID) else {
+            logger.warning("Could not get bounds for window \(windowID)", category: .nativeBridge)
+            return
+        }
+        
+        // Find the current screen
+        guard let currentScreen = findScreen(containing: currentBounds) else {
+            logger.warning("Could not find current screen for window", category: .nativeBridge)
+            return
+        }
+        
+        // Find the target screen in the specified direction
+        guard let targetScreen = findScreen(from: currentScreen, direction: direction) else {
+            logger.info("No screen found in direction \(direction.rawValue)", category: .nativeBridge)
+            return
+        }
+        
+        // Calculate new position on target screen
+        let newPosition = calculatePositionOnScreen(targetScreen, preservingRelativePosition: currentBounds, fromScreen: currentScreen)
+        
+        // Move the window
+        let result = moveWindow(windowID: windowID, to: newPosition)
+        
+        switch result {
+        case .success:
+            logger.info("✅ Successfully moved window to screen in direction \(direction.rawValue)", category: .nativeBridge)
+        case .failed(let error):
+            logger.warning("Failed to move window to screen: \(error)", category: .nativeBridge)
+        case .permissionDenied:
+            logger.warning("Permission denied for moving window to screen", category: .nativeBridge)
+        case .windowNotFound:
+            logger.error("Window not found when moving to screen", category: .nativeBridge)
+        }
+    }
+    
+    /// Find which screen contains the given bounds
+    private func findScreen(containing bounds: CGRect) -> NSScreen? {
+        let windowCenter = CGPoint(x: bounds.midX, y: bounds.midY)
+        
+        for screen in NSScreen.screens {
+            if screen.frame.contains(windowCenter) {
+                return screen
+            }
+        }
+        
+        // Fallback to main screen
+        return NSScreen.main
+    }
+    
+    /// Find a screen in the specified direction from the current screen
+    private func findScreen(from currentScreen: NSScreen, direction: ScreenDirection) -> NSScreen? {
+        let currentFrame = currentScreen.frame
+        let currentCenter = CGPoint(x: currentFrame.midX, y: currentFrame.midY)
+        
+        var bestScreen: NSScreen?
+        var bestDistance: CGFloat = .infinity
+        
+        for screen in NSScreen.screens {
+            guard screen != currentScreen else { continue }
+            
+            let screenFrame = screen.frame
+            let screenCenter = CGPoint(x: screenFrame.midX, y: screenFrame.midY)
+            
+            // Check if screen is in the correct direction
+            let isInDirection: Bool
+            switch direction {
+            case .left:
+                isInDirection = screenCenter.x < currentCenter.x
+            case .right:
+                isInDirection = screenCenter.x > currentCenter.x
+            case .up:
+                // In macOS coordinates, smaller Y is down, larger Y is up
+                isInDirection = screenCenter.y > currentCenter.y
+            case .down:
+                // In macOS coordinates, larger Y is down, smaller Y is up
+                isInDirection = screenCenter.y < currentCenter.y
+            }
+            
+            guard isInDirection else { continue }
+            
+            // Calculate distance
+            let dx = screenCenter.x - currentCenter.x
+            let dy = screenCenter.y - currentCenter.y
+            let distance = sqrt(dx * dx + dy * dy)
+            
+            // For directional movement, prioritize screens that are more aligned in that direction
+            let alignmentBonus: CGFloat
+            switch direction {
+            case .left, .right:
+                // For horizontal movement, prefer screens with similar Y coordinates
+                alignmentBonus = abs(dy) * 2.0
+            case .up, .down:
+                // For vertical movement, prefer screens with similar X coordinates
+                alignmentBonus = abs(dx) * 2.0
+            }
+            
+            let adjustedDistance = distance + alignmentBonus
+            
+            if adjustedDistance < bestDistance {
+                bestDistance = adjustedDistance
+                bestScreen = screen
+            }
+        }
+        
+        return bestScreen
+    }
+    
+    /// Calculate the position on the target screen, preserving relative position from source screen
+    private func calculatePositionOnScreen(_ targetScreen: NSScreen, preservingRelativePosition bounds: CGRect, fromScreen sourceScreen: NSScreen) -> CGPoint {
+        let sourceFrame = sourceScreen.visibleFrame
+        let targetFrame = targetScreen.visibleFrame
+        
+        // Calculate relative position on source screen (0.0 to 1.0)
+        let relativeX = (bounds.origin.x - sourceFrame.origin.x) / sourceFrame.width
+        let relativeY = (bounds.origin.y - sourceFrame.origin.y) / sourceFrame.height
+        
+        // Apply relative position to target screen
+        let newX = targetFrame.origin.x + (relativeX * targetFrame.width)
+        let newY = targetFrame.origin.y + (relativeY * targetFrame.height)
+        
+        // Ensure window stays within screen bounds
+        let maxX = targetFrame.maxX - bounds.width
+        let maxY = targetFrame.maxY - bounds.height
+        
+        let clampedX = min(max(newX, targetFrame.origin.x), maxX)
+        let clampedY = min(max(newY, targetFrame.origin.y), maxY)
+        
+        return CGPoint(x: clampedX, y: clampedY)
     }
     
     func activateWindow(windowID: CGWindowID) -> WindowMoveResult {
@@ -1121,26 +1261,34 @@ class NativeDesktopBridge: ObservableObject {
     }
     
     // MARK: - Utility Functions
-    
+
+    /// Create an AXUIElement for an app with a short messaging timeout
+    /// so calls to unresponsive apps don't block for 30+ seconds.
+    private func axAppElement(for pid: pid_t) -> AXUIElement {
+        let el = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(el, axTimeout)
+        return el
+    }
+
     private func getAXWindowElement(for windowID: CGWindowID) -> AXUIElement? {
         guard let app = getAppForWindow(windowID: windowID) else { return nil }
-        
-        let axApp = AXUIElementCreateApplication(app.processIdentifier)
-        
+
+        let axApp = axAppElement(for: app.processIdentifier)
+
         var axWindows: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &axWindows)
-        
+
         guard result == .success, let windows = axWindows as? [AXUIElement] else {
             return nil
         }
-        
+
         // Find the matching window
         for axWindow in windows {
             if let axWindowID = getWindowIDFromAXWindow(axWindow), axWindowID == windowID {
                 return axWindow
             }
         }
-        
+
         return nil
     }
     

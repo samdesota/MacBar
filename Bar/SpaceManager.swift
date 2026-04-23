@@ -315,4 +315,39 @@ class SpaceManager: ObservableObject {
     func isReady() -> Bool {
         return !availableSpaces.isEmpty && !currentSpaceID.isEmpty
     }
-} 
+
+    // MARK: - Live (uncached) queries — source of truth, bypass @Published timing
+
+    /// Reads the active space ID directly from the window server. Returns nil if SLS is unavailable.
+    func liveActiveSpaceID() -> String? {
+        guard connectionID != 0 else { return nil }
+        let id = SLSGetActiveSpace(connectionID)
+        guard id != 0 else { return nil }
+        return "space-\(id)"
+    }
+
+    /// Live full-screen check for a specific space ID, bypassing cached state.
+    func liveIsFullScreen(spaceIDString: String) -> Bool {
+        let numeric = spaceIDString.replacingOccurrences(of: "space-", with: "")
+        guard connectionID != 0, let raw = UInt64(numeric) else { return false }
+        return SLSSpaceGetType(connectionID, raw) == SpaceType.fullscreen.rawValue
+    }
+
+    /// All currently-managed space IDs across all displays. Used to garbage-collect stale taskbars.
+    func liveManagedSpaceIDs() -> Set<String> {
+        guard connectionID != 0,
+              let managedSpaces = SLSCopyManagedDisplaySpaces(connectionID) as? [[String: Any]] else {
+            return []
+        }
+        var out = Set<String>()
+        for displayData in managedSpaces {
+            guard let spacesData = displayData["Spaces"] as? [[String: Any]] else { continue }
+            for spaceData in spacesData {
+                if let info = PrivateSpaceInfo(from: spaceData) {
+                    out.insert("space-\(info.spaceID)")
+                }
+            }
+        }
+        return out
+    }
+}

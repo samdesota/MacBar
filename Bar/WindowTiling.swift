@@ -60,39 +60,20 @@ class WindowTiling: ObservableObject {
 
     // MARK: - Public Interface
 
-    /// Attempt to tile a newly created window to fullscreen (respecting taskbar)
+    /// Track a newly created window (no longer automatically tiles to fullscreen)
     func handleNewWindow(windowID: CGWindowID, windowInfo: NativeDesktopBridge.NativeWindowInfo) {
-        logger.info("🧩 Handling new window: \(windowInfo.owner) - \(windowInfo.name) (ID: \(windowID))", category: .windowTiling)
+        logger.info("🧩 Detected new window: \(windowInfo.owner) - \(windowInfo.name) (ID: \(windowID))", category: .windowTiling)
 
-        // Skip system windows and tiny windows, but use higher thresholds for new window tiling
+        // Skip system windows and tiny windows for tracking
         if shouldSkipWindow(windowInfo.owner, windowInfo.bounds) ||
            windowInfo.bounds.width < 200 || windowInfo.bounds.height < 100 {
-            logger.debug("Skipping window: \(windowInfo.owner) (\(windowInfo.bounds.width)x\(windowInfo.bounds.height))", category: .windowTiling)
+            logger.debug("Skipping window tracking: \(windowInfo.owner) (\(windowInfo.bounds.width)x\(windowInfo.bounds.height))", category: .windowTiling)
             return
         }
 
-        // Also skip Finder for new window tiling (but allow it in overlap prevention)
-        if windowInfo.owner == "Finder" {
-            logger.debug("Skipping Finder for tiling", category: .windowTiling)
-            return
-        }
-
-        // Only tile windows on the main screen
-        if !isWindowOnMainScreen(windowInfo.bounds) {
-            logger.info("🖥️ Skipping window tiling - window is on secondary screen: \(windowInfo.owner)", category: .windowTiling)
-            return
-        }
-
-        // Calculate the ideal fullscreen bounds (respecting taskbar)
-        guard let targetBounds = calculateFullscreenBounds() else {
-            logger.warning("Cannot calculate fullscreen bounds for window tiling", category: .windowTiling)
-            return
-        }
-
-        logger.info("🧩 Attempting to tile window \(windowInfo.owner) to fullscreen: \(targetBounds)", category: .windowTiling)
-
-        // Attempt to resize and position the window
-        attemptFullscreenTiling(windowID: windowID, targetBounds: targetBounds, windowInfo: windowInfo)
+        // Track the window but don't automatically tile it
+        // User can manually tile by pressing Command twice (Command tap in switching mode)
+        logger.debug("Window tracked but not auto-tiled: \(windowInfo.owner)", category: .windowTiling)
     }
 
     /// Check if a window has been identified as size-restricted
@@ -249,6 +230,40 @@ class WindowTiling: ObservableObject {
     /// Get current window padding value
     func getWindowPadding() -> CGFloat {
         return windowPadding
+    }
+    
+    /// Manually tile a specific window to fullscreen (user-triggered action)
+    func tileWindowToFullscreen(windowID: CGWindowID) {
+        logger.info("🔲 Manually tiling window \(windowID) to fullscreen", category: .windowTiling)
+
+        guard let windowBounds = nativeBridge?.getWindowBounds(windowID: windowID) else {
+            logger.warning("Cannot get bounds for window \(windowID)", category: .windowTiling)
+            return
+        }
+        
+        guard let windowScreen = getScreenForWindow(windowBounds) else {
+            logger.warning("Cannot determine screen for window \(windowID)", category: .windowTiling)
+            return
+        }
+
+        guard let targetBounds = calculateFullscreenBounds(targetScreen: windowScreen) else {
+            logger.warning("Cannot calculate fullscreen bounds for manual tiling", category: .windowTiling)
+            return
+        }
+        
+        // Get window info for the window
+        guard let bridge = nativeBridge else {
+            logger.warning("NativeBridge not available for manual tiling", category: .windowTiling)
+            return
+        }
+        
+        let allWindows = bridge.getAllWindows(includeOffscreen: false)
+        
+        if let windowInfo = allWindows.first(where: { $0.windowID == windowID }) {
+            attemptFullscreenTiling(windowID: windowID, targetBounds: targetBounds, windowInfo: windowInfo)
+        } else {
+            logger.warning("Window \(windowID) not found for manual tiling", category: .windowTiling)
+        }
     }
 
     /// Handle focus change to synchronize split windows
@@ -436,36 +451,35 @@ class WindowTiling: ObservableObject {
 
         logger.debug("Checking \(allWindows.count) windows for taskbar overlap", category: .windowTiling)
 
-        // Get current taskbar bounds
-        guard let screen = NSScreen.main else {
-            logger.warning("Cannot get main screen for taskbar overlap prevention", category: .windowTiling)
-            return
-        }
-
-        let screenFrame = screen.visibleFrame
-        let taskbarY = screenFrame.maxY - 5  // Same calculation as elsewhere
-        let taskbarTop = taskbarY + taskbarHeight
-
         for window in allWindows {
             // Skip system windows using same logic
             if shouldSkipWindow(window.owner, window.bounds) {
                 continue
             }
 
-            // Check if window overlaps with taskbar
-            let windowBottom = window.bounds.minY
-            let windowTop = window.bounds.maxY
+            // Get the screen that contains this window
+            guard let windowScreen = getScreenForWindow(window.bounds) else {
+                logger.warning("Cannot determine screen for window \(window.owner)", category: .windowTiling)
+                continue
+            }
 
-                            logger.debug("Window \(window.owner): Y=\(window.bounds.minY), H=\(window.bounds.height), Bottom=\(windowBottom), Top=\(windowTop), TaskbarY=\(taskbarY), TaskbarTop=\(taskbarTop)", category: .windowTiling)
+            let fullScreenBounds = calculateFullscreenBounds(targetScreen: windowScreen)
+            let axWindowBounds = window.bounds
+
+            logger.info("Checking window \(window.owner) bounds: window.maxY=\(axWindowBounds.maxY) vs fullScreen.maxY=\(fullScreenBounds!.maxY)", category: .windowTiling)
 
             // Check if window overlaps with taskbar area
-            if windowBottom < taskbarTop && windowTop > taskbarY {
-                logger.info("Window \(window.owner) overlaps taskbar - adjusting position", category: .windowTiling)
+            if fullScreenBounds != nil && axWindowBounds.maxY > fullScreenBounds!.maxY {
+                let overflow = axWindowBounds.maxY - fullScreenBounds!.maxY
+                logger.info("Window \(window.owner) overlaps taskbar by \(overflow)px - adjusting", category: .windowTiling)
 
                 // Calculate new height to avoid taskbar overlap
-                let newHeight = taskbarY - window.bounds.minY - windowPadding
+                let newHeight = axWindowBounds.height - overflow
                 let minHeight: CGFloat = 200
                 let finalHeight = max(newHeight, minHeight)
+
+                // print old height, new height
+                logger.debug("Old height: \(window.bounds.height), New height: \(finalHeight)", category: .windowTiling)
 
                 // Resize window using bridge
                 let newSize = CGSize(width: window.bounds.width, height: finalHeight)
@@ -473,9 +487,9 @@ class WindowTiling: ObservableObject {
 
                 switch result {
                 case .success:
-                                            logger.info("Successfully resized window \(window.owner) to avoid taskbar overlap", category: .windowTiling)
+                    logger.info("Successfully resized window \(window.owner) to avoid taskbar overlap", category: .windowTiling)
                 case .failed(let error):
-                                            logger.warning("Failed to resize window \(window.owner): \(error)", category: .windowTiling)
+                    logger.warning("Failed to resize window \(window.owner): \(error)", category: .windowTiling)
                     // Try to record size restriction if resize failed
                     recordSizeRestriction(
                         windowID: window.windowID,
@@ -484,15 +498,55 @@ class WindowTiling: ObservableObject {
                         windowInfo: window
                     )
                 case .permissionDenied:
-                                            logger.warning("Permission denied for resizing window \(window.owner)", category: .windowTiling)
+                    logger.warning("Permission denied for resizing window \(window.owner)", category: .windowTiling)
                 case .windowNotFound:
-                                            logger.warning("Window not found for resizing: \(window.owner)", category: .windowTiling)
+                    logger.warning("Window not found for resizing: \(window.owner)", category: .windowTiling)
                 }
             }
         }
     }
 
     // MARK: - Private Implementation
+
+    /// Get the screen that contains the given window bounds
+    private func getScreenForWindow(_ windowBounds: CGRect) -> NSScreen? {
+        // Calculate the window's center point
+        let windowCenter = CGPoint(
+            x: windowBounds.midX,
+            y: windowBounds.midY
+        )
+
+        // Find the screen that contains the window's center
+        for screen in NSScreen.screens {
+            if screen.frame.contains(windowCenter) {
+                logger.debug("Window center \(windowCenter) is on screen: \(screen.frame)", category: .windowTiling)
+                return screen
+            }
+        }
+
+        // Fallback: if no screen contains the center, find the screen with the most overlap
+        var bestScreen: NSScreen?
+        var maxOverlapArea: CGFloat = 0
+
+        for screen in NSScreen.screens {
+            let intersection = windowBounds.intersection(screen.frame)
+            let overlapArea = intersection.width * intersection.height
+
+            if overlapArea > maxOverlapArea {
+                maxOverlapArea = overlapArea
+                bestScreen = screen
+            }
+        }
+
+        if let screen = bestScreen {
+            logger.debug("Window \(windowBounds) has most overlap with screen: \(screen.frame)", category: .windowTiling)
+            return screen
+        }
+
+        // Last resort: return main screen
+        logger.warning("Could not determine screen for window \(windowBounds), using main screen", category: .windowTiling)
+        return NSScreen.main
+    }
 
     /// Check if a window is on the main screen
     private func isWindowOnMainScreen(_ windowBounds: CGRect) -> Bool {
@@ -648,27 +702,42 @@ class WindowTiling: ObservableObject {
         }
     }
 
-    private func calculateFullscreenBounds() -> CGRect? {
-        guard let screen = NSScreen.main else {
+    private func getAXBounds(rect: CGRect) -> CGRect {
+        let primary = NSScreen.screens.first { $0.frame.origin == .zero } ?? NSScreen.main
+
+
+        logger.debug("AX bounds, Primary screen frame: \(primary?.frame.width ?? 0), \(primary?.frame.height ?? 0)", category: .windowTiling)
+        logger.debug("AX bounds, Rect: \(rect.maxY)", category: .windowTiling)
+        return CGRect(
+            x: rect.minX, 
+            y: (primary?.frame.height ?? 0) - rect.maxY,
+            width: rect.width, 
+            height: rect.height
+        )
+    }
+
+    private func calculateFullscreenBounds(targetScreen: NSScreen? = nil) -> CGRect? {
+        guard let screen = targetScreen ?? NSScreen.main else {
             logger.warning("Cannot get main screen for fullscreen bounds calculation", category: .windowTiling)
             return nil
         }
 
         // Use full screen frame and manually calculate menu bar height
-        let fullScreenFrame = screen.frame
-        let visibleFrame = screen.visibleFrame
+        let fullScreenFrame = getAXBounds(rect: screen.frame)
+        let visibleFrame = getAXBounds(rect: screen.visibleFrame)
 
-        // Calculate menu bar height (difference between full frame and visible frame top)
-        let menuBarHeight = fullScreenFrame.maxY - visibleFrame.maxY
-        logger.debug("Menu bar height: \(menuBarHeight)", category: .windowTiling)
+        // print full screen frame
+        logger.debug("Full screen frame: \(fullScreenFrame)", category: .windowTiling)
+        // print visible frame
+        logger.debug("Visible frame: \(visibleFrame)", category: .windowTiling)
 
         // Calculate available space, accounting for menu bar at top, taskbar at bottom, and padding
         let taskbarY = fullScreenFrame.maxY - 5  // Same as in WindowManager
         logger.debug("Taskbar Y: \(taskbarY)", category: .windowTiling)
 
         // Start from the bottom of the menu bar, not the top of the screen
-        let availableTop = fullScreenFrame.minY + menuBarHeight + windowPadding
-        let availableBottom = taskbarY - taskbarHeight - windowPadding
+        let availableBottom = visibleFrame.maxY - taskbarHeight - windowPadding * 2 
+        let availableTop = visibleFrame.minY + windowPadding
         let availableHeight = availableBottom - availableTop
         let availableWidth = fullScreenFrame.width - (windowPadding * 2)
         logger.debug("Available height: \(availableHeight)", category: .windowTiling)
@@ -684,7 +753,6 @@ class WindowTiling: ObservableObject {
         )
 
         logger.debug("Calculated fullscreen bounds: \(targetBounds) with \(windowPadding)px padding", category: .windowTiling)
-        logger.debug("Full screen: \(fullScreenFrame), visible: \(visibleFrame), menu bar height: \(menuBarHeight)", category: .windowTiling)
         logger.debug("Available area: top=\(availableTop), bottom=\(availableBottom), taskbar Y: \(taskbarY)", category: .windowTiling)
 
         return targetBounds
@@ -701,7 +769,7 @@ class WindowTiling: ObservableObject {
 
         switch moveResult {
         case .success:
-                            logger.info("✅ Successfully moved window \(windowInfo.owner) to position \(targetBounds.origin)", category: .windowTiling)
+                            logger.info("✅ Successfully moved window \(windowInfo.owner) to position \(targetBounds.minY)", category: .windowTiling)
         case .failed(let error):
                             logger.warning("⚠️ Failed to move window \(windowInfo.owner): \(error)", category: .windowTiling)
         case .permissionDenied:
