@@ -89,10 +89,11 @@ class KeyboardSwitcher: ObservableObject {
         }
         
         logger.info("Starting KeyboardSwitcher", category: .keyboardSwitching)
-        
+
         startGlobalKeyMonitoring()
         startLocalKeyMonitoring()
-        
+        createEventTap()
+
         isActive = true
         logger.info("KeyboardSwitcher started successfully", category: .keyboardSwitching)
     }
@@ -105,13 +106,13 @@ class KeyboardSwitcher: ObservableObject {
         }
         
         logger.info("Stopping KeyboardSwitcher", category: .keyboardSwitching)
-        
+
         stopGlobalKeyMonitoring()
         stopLocalKeyMonitoring()
         stopSwitchingModeKeyMonitoring()
-        destroyEventTap()
         deactivateSwitchingMode()
-        
+        destroyEventTap()
+
         isActive = false
         logger.info("KeyboardSwitcher stopped", category: .keyboardSwitching)
     }
@@ -208,12 +209,30 @@ class KeyboardSwitcher: ObservableObject {
     private func handleModifierKeyEvent(_ event: NSEvent, scope: String) {
         let flags = event.modifierFlags
         let isCommandPressed = flags.contains(.command)
-        
+        let hasControl = flags.contains(.control)
+        let hasOption = flags.contains(.option)
+        let hasShift = flags.contains(.shift)
+
+        logger.debug("flagsChanged [\(scope)] cmd=\(isCommandPressed) ctrl=\(hasControl) opt=\(hasOption) shift=\(hasShift) rawFlags=\(flags.rawValue) wasDown=\(isCommandKeyDown)", category: .keyboardSwitching)
+
+        // If command is already held and another modifier appears, mark as combination.
+        // Karabiner sends Cmd+Ctrl+Shift+Option as sequential flagsChanged events,
+        // so Command arrives first alone, then the others follow.
+        if isCommandKeyDown && isCommandPressed && (hasControl || hasOption || hasShift) {
+            if !isModifierCombination {
+                logger.info("Other modifier added while Command held [\(scope)] ctrl=\(hasControl) opt=\(hasOption) shift=\(hasShift) — marking as combination", category: .keyboardSwitching)
+                isModifierCombination = true
+            }
+        }
+
         // Check for command key state change
         if isCommandPressed != isCommandKeyDown {
             if isCommandPressed {
-                handleCommandKeyDown(scope: scope)
+                let hasOtherModifiers = hasControl || hasOption || hasShift
+                logger.info("Command DOWN [\(scope)] hasOtherModifiers=\(hasOtherModifiers) (ctrl=\(hasControl) opt=\(hasOption) shift=\(hasShift))", category: .keyboardSwitching)
+                handleCommandKeyDown(scope: scope, hasOtherModifiers: hasOtherModifiers)
             } else {
+                logger.info("Command UP [\(scope)] isModifierCombination=\(isModifierCombination)", category: .keyboardSwitching)
                 handleCommandKeyUp(scope: scope)
             }
         }
@@ -232,15 +251,15 @@ class KeyboardSwitcher: ObservableObject {
     
     // MARK: - Command Key Handling
     
-    private func handleCommandKeyDown(scope: String) {
+    private func handleCommandKeyDown(scope: String, hasOtherModifiers: Bool = false) {
         guard !isCommandKeyDown else { return }
-        
-        logger.debug("Command key DOWN [\(scope)]", category: .keyboardSwitching)
-        
+
+        logger.debug("Command key DOWN [\(scope)] otherModifiers=\(hasOtherModifiers)", category: .keyboardSwitching)
+
         isCommandKeyDown = true
-        isModifierCombination = false
+        isModifierCombination = hasOtherModifiers
         commandKeyDownTime = Date()
-        
+
         logger.debug("Command key press started at \(commandKeyDownTime!)", category: .keyboardSwitching)
     }
     
@@ -294,9 +313,8 @@ class KeyboardSwitcher: ObservableObject {
         
         // Update window list and assign keys
         updateWindowListAndAssignKeys()
-        
+
         // Start monitoring keystrokes during switching mode
-        createEventTap()
         startSwitchingModeKeyMonitoring()
         
         DispatchQueue.main.async {
@@ -312,9 +330,8 @@ class KeyboardSwitcher: ObservableObject {
         
         logger.info("⏹️ DEACTIVATING SWITCHING MODE", category: .keyboardSwitching)
         
-        // Stop keystroke monitoring and destroy event tap
+        // Stop keystroke monitoring
         stopSwitchingModeKeyMonitoring()
-        destroyEventTap()
         
         // Clear split selection mode and close mode
         clearSplitSelectionMode()
@@ -560,6 +577,12 @@ class KeyboardSwitcher: ObservableObject {
     
     /// Create CGEvent tap to capture input system-wide
     private func createEventTap() {
+        guard eventTap == nil else {
+            logger.info("EventTap already exists, skipping creation", category: .keyboardSwitching)
+            return
+        }
+
+        logger.info("Creating persistent event tap...", category: .keyboardSwitching)
         // Create the event tap - capture all keyboard events to prevent them from reaching other apps during switching mode
         let eventMask = (1 << CGEventType.keyDown.rawValue) |
                        (1 << CGEventType.keyUp.rawValue) |
@@ -605,9 +628,36 @@ class KeyboardSwitcher: ObservableObject {
     
     /// Handle CGEvent tap callback for keystroke processing
     private func handleEventTapCallback(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        // Only process if we're in switching mode
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let tap = eventTap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+            return Unmanaged.passUnretained(event)
+        }
+
+        // Log all events hitting the tap
+        let tapFlags = event.flags
+        logger.debug("EventTap type=\(type.rawValue) flags=\(tapFlags.rawValue) cmd=\(tapFlags.contains(.maskCommand)) ctrl=\(tapFlags.contains(.maskControl)) opt=\(tapFlags.contains(.maskAlternate)) shift=\(tapFlags.contains(.maskShift)) switching=\(isSwitchingMode)", category: .keyboardSwitching)
+
+        // Always intercept Cmd+B for bar hide toggle (regardless of switching mode)
+        if type == .keyDown {
+            let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+            let flags = event.flags
+            let hasCmd = flags.contains(.maskCommand)
+            logger.info("EventTap keyDown: keyCode=\(keyCode) cmd=\(hasCmd) switching=\(isSwitchingMode)", category: .keyboardSwitching)
+            if keyCode == 11 && hasCmd && flags.contains(.maskControl) && flags.contains(.maskAlternate) && flags.contains(.maskShift) {
+                logger.info("🙈 Cmd+B detected — toggling bar hide", category: .keyboardSwitching)
+                isModifierCombination = true
+                DispatchQueue.main.async {
+                    self.windowManager?.toggleBarHidden()
+                }
+                return nil
+            }
+        }
+
+        // Outside switching mode, pass everything else through
         guard isSwitchingMode else {
-            return Unmanaged.passUnretained(event) // Pass through
+            return Unmanaged.passUnretained(event)
         }
         
         // During switching mode, consume ALL keyboard events to prevent other apps from receiving them
@@ -644,6 +694,12 @@ class KeyboardSwitcher: ObservableObject {
             let flags = event.flags
             let isCommandPressed = flags.contains(.maskCommand)
             
+            // If command is already held and another modifier appears, mark as combination
+            if isCommandKeyDown && isCommandPressed &&
+               !flags.isDisjoint(with: [.maskControl, .maskAlternate, .maskShift]) {
+                isModifierCombination = true
+            }
+
             // Detect Command key release (tap) during switching mode
             if !isCommandPressed && isCommandKeyDown {
                 // Command key was just released
@@ -668,9 +724,10 @@ class KeyboardSwitcher: ObservableObject {
                 isModifierCombination = false
             } else if isCommandPressed && !isCommandKeyDown {
                 // Command key was just pressed
-                logger.debug("Command key pressed during switching mode", category: .keyboardSwitching)
+                let hasOtherModifiers = !flags.isDisjoint(with: [.maskControl, .maskAlternate, .maskShift])
+                logger.debug("Command key pressed during switching mode, otherModifiers=\(hasOtherModifiers)", category: .keyboardSwitching)
                 isCommandKeyDown = true
-                isModifierCombination = false
+                isModifierCombination = hasOtherModifiers
                 commandKeyDownTime = Date()
             }
             
@@ -952,7 +1009,7 @@ class KeyboardSwitcher: ObservableObject {
     }
     
     // MARK: - Utilities
-    
+
     /// Convert key code to character for switching mode
     private func keyCodeToCharacter(_ keyCode: UInt16) -> String {
         // Convert to lowercase for consistent matching

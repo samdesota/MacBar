@@ -16,10 +16,10 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
     @Published var hasAccessibilityPermission: Bool = false
     @Published var debugInfo: String = ""
     @Published var currentSpaceID: String = ""
+    @Published var hiddenSpaces: Set<String> = []
     
     private var timer: Timer?
     private var windowOrder: [UInt64: [CGWindowID]] = [:] // Track order by space ID -> window IDs
-    private var taskbarHeight: CGFloat = 42
     private var taskbarY: CGFloat = 0
     private let logger = Logger.shared
     private let spaceManager = SpaceManager.shared
@@ -161,7 +161,7 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
         if let screen = NSScreen.main {
             let screenFrame = screen.visibleFrame
             taskbarY = screenFrame.maxY - 5 // Same as in BarApp.swift
-            logger.info("Taskbar positioned at Y: \(taskbarY), height: \(taskbarHeight)", category: .windowPositioning)
+            logger.info("Taskbar positioned at Y: \(taskbarY), height: \(WindowTiling.taskbarHeight)", category: .windowPositioning)
         }
     }
     
@@ -261,6 +261,7 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
             currentActiveSpaceID = spaceID
             // Invalidate space cache since we're switching to a different space
             invalidateSpaceCache()
+            syncBarHiddenToTiling()
             updateWindowList()
         }
     }
@@ -390,9 +391,35 @@ class WindowManager: ObservableObject, NativeDesktopBridgeDelegate {
     private func handleFocusChangeForSplitSync(windowID: CGWindowID?) {
         windowTiling?.handleWindowFocusChanged(focusedWindowID: windowID)
     }
-    
 
-    
+    // MARK: - Bar Hide Mode
+
+    func isBarHidden(for spaceID: String) -> Bool {
+        return hiddenSpaces.contains(spaceID)
+    }
+
+    func isBarHiddenForCurrentSpace() -> Bool {
+        let spaceIDString = "space-\(currentActiveSpaceID)"
+        return hiddenSpaces.contains(spaceIDString)
+    }
+
+    func toggleBarHidden() {
+        let spaceIDString = "space-\(currentActiveSpaceID)"
+        if hiddenSpaces.contains(spaceIDString) {
+            hiddenSpaces.remove(spaceIDString)
+            logger.info("🙈 Bar unhidden for space \(spaceIDString)", category: .windowManager)
+        } else {
+            hiddenSpaces.insert(spaceIDString)
+            logger.info("🙈 Bar hidden for space \(spaceIDString)", category: .windowManager)
+        }
+        syncBarHiddenToTiling()
+        windowTiling?.adjustWindowsForBarToggle()
+    }
+
+    func syncBarHiddenToTiling() {
+        windowTiling?.isBarHidden = isBarHiddenForCurrentSpace()
+    }
+
     // MARK: - NativeDesktopBridgeDelegate
     
     func onFocusedWindowChanged(windowID: CGWindowID?) {

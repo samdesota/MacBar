@@ -30,9 +30,16 @@ class Logger: ObservableObject {
 
     private let osLog = OSLog(subsystem: "com.bar.app", category: "Bar")
 
+    private let logFileHandle: FileHandle?
+
     private init() {
         // Enable accessibility and window positioning logging by default for debugging
-        enabledCategories = [.spaceManagement, .taskbar, .windowTiling, .windowManager]
+        enabledCategories = [.spaceManagement, .taskbar, .windowTiling, .windowManager, .keyboardSwitching]
+
+        let path = "/tmp/bar-debug.log"
+        FileManager.default.createFile(atPath: path, contents: nil)
+        logFileHandle = FileHandle(forWritingAtPath: path)
+        logFileHandle?.seekToEndOfFile()
     }
 
     func enableCategory(_ category: LogCategory) {
@@ -61,8 +68,10 @@ class Logger: ObservableObject {
         let timestamp = DateFormatter.logFormatter.string(from: Date())
         let logMessage = "[\(timestamp)] [\(category.rawValue)] \(message)"
 
-        // Use print for cleaner console output (os_log causes duplicates in Xcode console)
         print(logMessage)
+        if let fh = logFileHandle, let data = (logMessage + "\n").data(using: .utf8) {
+            fh.write(data)
+        }
     }
 
     func debug(_ message: String, category: LogCategory) {

@@ -14,8 +14,10 @@ class WindowTiling: ObservableObject {
     private let logger = Logger.shared
     private weak var nativeBridge: NativeDesktopBridge?
 
-    // Configuration - matches WindowManager values
-    private let taskbarHeight: CGFloat = 42
+    // Configuration
+    static let taskbarHeight: CGFloat = 42
+    var isBarHidden: Bool = false
+    private var effectiveTaskbarHeight: CGFloat { isBarHidden ? 0 : WindowTiling.taskbarHeight }
 
     // Window padding configuration - adjustable for user preferences
     var windowPadding: CGFloat = 5  // Padding around all sides of windows
@@ -427,6 +429,38 @@ class WindowTiling: ObservableObject {
         applyWindowBounds(windowID: windowID, bounds: targetBounds, windowName: "Window \(windowID)")
     }
 
+    /// Adjust all windows whose bottom edge is at the old taskbar boundary to the new one
+    func adjustWindowsForBarToggle() {
+        guard let bridge = nativeBridge else { return }
+
+        let savedHidden = isBarHidden
+        let newBounds = calculateFullscreenBounds()
+
+        isBarHidden = !savedHidden
+        let oldBounds = calculateFullscreenBounds()
+        isBarHidden = savedHidden
+
+        guard let newFull = newBounds, let oldFull = oldBounds else { return }
+
+        logger.info("🔄 Adjusting windows for bar toggle (hidden=\(savedHidden), oldMaxY=\(oldFull.maxY), newMaxY=\(newFull.maxY))", category: .windowTiling)
+
+        let allWindows = bridge.getVisibleApplicationWindows()
+        let tolerance: CGFloat = 15
+
+        for window in allWindows {
+            if shouldSkipWindow(window.owner, window.bounds) { continue }
+
+            let b = window.bounds
+            if abs(b.maxY - oldFull.maxY) < tolerance {
+                let newHeight = newFull.maxY - b.minY
+                guard newHeight > 200 else { continue }
+                let newRect = CGRect(x: b.minX, y: b.minY, width: b.width, height: newHeight)
+                logger.info("🔄 Adjusting \(window.owner): height \(b.height) → \(newHeight)", category: .windowTiling)
+                applyWindowBounds(windowID: window.windowID, bounds: newRect, windowName: window.owner)
+            }
+        }
+    }
+
     /// Prevent all windows from overlapping with the taskbar (safety net)
     func preventTaskbarOverlap() {
         guard let bridge = nativeBridge else {
@@ -601,7 +635,7 @@ class WindowTiling: ObservableObject {
 
         // Calculate available area
         let availableTop = fullScreenFrame.minY + menuBarHeight + windowPadding
-        let availableBottom = taskbarY - taskbarHeight - windowPadding
+        let availableBottom = taskbarY - effectiveTaskbarHeight - windowPadding
         let availableHeight = availableBottom - availableTop
         let availableWidth = fullScreenFrame.width - (windowPadding * 2)
 
@@ -736,7 +770,7 @@ class WindowTiling: ObservableObject {
         logger.debug("Taskbar Y: \(taskbarY)", category: .windowTiling)
 
         // Start from the bottom of the menu bar, not the top of the screen
-        let availableBottom = visibleFrame.maxY - taskbarHeight - windowPadding * 2 
+        let availableBottom = visibleFrame.maxY - effectiveTaskbarHeight - windowPadding * 2
         let availableTop = visibleFrame.minY + windowPadding
         let availableHeight = availableBottom - availableTop
         let availableWidth = fullScreenFrame.width - (windowPadding * 2)

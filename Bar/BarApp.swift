@@ -244,7 +244,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Update window size and position
         window.setFrame(
-            NSRect(x: newX, y: newY, width: newWidth, height: 42),
+            NSRect(x: newX, y: newY, width: newWidth, height: WindowTiling.taskbarHeight),
             display: true,
             animate: true
         )
@@ -325,9 +325,42 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Start keyboard switching functionality after window is created
         initializeKeyboardSwitching()
 
+        // Observe bar hide state + switching mode for taskbar visibility
+        setupBarHideObservers()
+
         // Wire up reconciliation triggers and run an initial pass.
         setupReconciliationTriggers()
         reconcileTaskbars()
+    }
+
+    private func setupBarHideObservers() {
+        Publishers.CombineLatest(
+            windowManager.$hiddenSpaces,
+            keyboardSwitcher.$isSwitchingMode
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] hiddenSpaces, isSwitching in
+            self?.updateTaskbarVisibility(hiddenSpaces: hiddenSpaces, isSwitching: isSwitching)
+        }
+        .store(in: &cancellables)
+    }
+
+    private func updateTaskbarVisibility(hiddenSpaces: Set<String>, isSwitching: Bool) {
+        for (spaceID, window) in dockWindows {
+            let isHidden = hiddenSpaces.contains(spaceID)
+            let isActiveSpace = (spaceID == currentActiveSpaceID)
+            let shouldShow = !isHidden || (isHidden && isActiveSpace && isSwitching)
+
+            if shouldShow {
+                if !window.isVisible {
+                    window.orderFrontRegardless()
+                }
+            } else {
+                if window.isVisible {
+                    window.orderOut(nil)
+                }
+            }
+        }
     }
 
     // MARK: - Reconciliation (idempotent, source-of-truth driven)
@@ -417,7 +450,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let screenFrame = screen.visibleFrame
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: screenFrame.width - 10, height: 42),
+            contentRect: NSRect(x: 0, y: 0, width: screenFrame.width - 10, height: WindowTiling.taskbarHeight),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -432,8 +465,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.setFrameOrigin(NSPoint(x: screenFrame.minX + 5, y: screenFrame.minY + 5))
 
         dockWindows[spaceID] = window
-        // orderFrontRegardless avoids the canBecomeKeyWindow warning we were seeing.
-        window.orderFrontRegardless()
+
+        if windowManager.isBarHidden(for: spaceID) {
+            window.orderOut(nil)
+        } else {
+            window.orderFrontRegardless()
+        }
 
         // Wire keyboard switcher to the WindowManager (idempotent connect).
         keyboardSwitcher.connectWindowManager(windowManager)
