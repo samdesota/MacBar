@@ -434,28 +434,29 @@ class WindowTiling: ObservableObject {
         guard let bridge = nativeBridge else { return }
 
         let savedHidden = isBarHidden
-        let newBounds = calculateFullscreenBounds()
-
-        isBarHidden = !savedHidden
-        let oldBounds = calculateFullscreenBounds()
-        isBarHidden = savedHidden
-
-        guard let newFull = newBounds, let oldFull = oldBounds else { return }
-
-        logger.info("🔄 Adjusting windows for bar toggle (hidden=\(savedHidden), oldMaxY=\(oldFull.maxY), newMaxY=\(newFull.maxY))", category: .windowTiling)
-
         let allWindows = bridge.getVisibleApplicationWindows()
         let tolerance: CGFloat = 15
+
+        logger.info("🔄 Adjusting windows for bar toggle (hidden=\(savedHidden))", category: .windowTiling)
 
         for window in allWindows {
             if shouldSkipWindow(window.owner, window.bounds) { continue }
 
+            guard let windowScreen = getScreenForWindow(window.bounds) else { continue }
+
+            let newFull = calculateFullscreenBounds(targetScreen: windowScreen)
+            isBarHidden = !savedHidden
+            let oldFull = calculateFullscreenBounds(targetScreen: windowScreen)
+            isBarHidden = savedHidden
+
+            guard let newBounds = newFull, let oldBounds = oldFull else { continue }
+
             let b = window.bounds
-            if abs(b.maxY - oldFull.maxY) < tolerance {
-                let newHeight = newFull.maxY - b.minY
+            if abs(b.maxY - oldBounds.maxY) < tolerance {
+                let newHeight = newBounds.maxY - b.minY
                 guard newHeight > 200 else { continue }
                 let newRect = CGRect(x: b.minX, y: b.minY, width: b.width, height: newHeight)
-                logger.info("🔄 Adjusting \(window.owner): height \(b.height) → \(newHeight)", category: .windowTiling)
+                logger.info("🔄 Adjusting \(window.owner): height \(b.height) → \(newHeight) on \(windowScreen.localizedName)", category: .windowTiling)
                 applyWindowBounds(windowID: window.windowID, bounds: newRect, windowName: window.owner)
             }
         }
