@@ -49,6 +49,7 @@ class KeyboardSwitcher: ObservableObject {
     
     // Event tap for capturing keystrokes during switching mode
     private var eventTap: CFMachPort?
+    private var eventTapRunLoopSource: CFRunLoopSource?
     
     // Command key tracking
     private var commandKeyDownTime: Date?
@@ -611,16 +612,26 @@ class KeyboardSwitcher: ObservableObject {
         
         // Enable the event tap
         CGEvent.tapEnable(tap: eventTap, enable: true)
-        
-        // Add to run loop
-        let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
-        
-        logger.info("CGEvent tap created and activated for input capture", category: .keyboardSwitching)
+
+        // Add to run loop — store source as property to prevent GC
+        eventTapRunLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
+        if let source = eventTapRunLoopSource {
+            CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+            logger.info("CGEvent tap created and added to main run loop", category: .keyboardSwitching)
+        } else {
+            logger.error("Failed to create run loop source for event tap", category: .keyboardSwitching)
+        }
+
+        let isEnabled = CGEvent.tapIsEnabled(tap: eventTap)
+        logger.info("CGEvent tap enabled=\(isEnabled), machPort valid=\(CFMachPortIsValid(eventTap))", category: .keyboardSwitching)
     }
     
     /// Destroy the CGEvent tap
     private func destroyEventTap() {
+        if let source = eventTapRunLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+            eventTapRunLoopSource = nil
+        }
         if let eventTap = eventTap {
             CGEvent.tapEnable(tap: eventTap, enable: false)
             CFMachPortInvalidate(eventTap)
@@ -631,6 +642,16 @@ class KeyboardSwitcher: ObservableObject {
     
     /// Handle CGEvent tap callback for keystroke processing
     private func handleEventTapCallback(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        logger.info("EventTap callback: type=\(type.rawValue) switching=\(isSwitchingMode)", category: .keyboardSwitching)
+
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            logger.warning("EventTap was disabled (type=\(type.rawValue)), re-enabling", category: .keyboardSwitching)
+            if let tap = eventTap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+            return Unmanaged.passUnretained(event)
+        }
+
         // Only process if we're in switching mode
         guard isSwitchingMode else {
             return Unmanaged.passUnretained(event) // Pass through
