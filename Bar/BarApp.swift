@@ -334,22 +334,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setupBarHideObservers() {
-        Publishers.CombineLatest(
+        Publishers.CombineLatest3(
             windowManager.$hiddenSpaces,
-            keyboardSwitcher.$isSwitchingMode
+            keyboardSwitcher.$isSwitchingMode,
+            windowManager.$spaceWindows
         )
         .receive(on: DispatchQueue.main)
-        .sink { [weak self] hiddenSpaces, isSwitching in
-            self?.updateTaskbarVisibility(hiddenSpaces: hiddenSpaces, isSwitching: isSwitching)
+        .sink { [weak self] hiddenSpaces, isSwitching, spaceWindows in
+            self?.updateTaskbarVisibility(hiddenSpaces: hiddenSpaces, isSwitching: isSwitching, spaceWindows: spaceWindows)
         }
         .store(in: &cancellables)
     }
 
-    private func updateTaskbarVisibility(hiddenSpaces: Set<String>, isSwitching: Bool) {
+    private func updateTaskbarVisibility(hiddenSpaces: Set<String>, isSwitching: Bool, spaceWindows: [UInt64: [WindowInfo]]) {
         for (spaceID, window) in dockWindows {
             let isHidden = hiddenSpaces.contains(spaceID)
             let isActiveSpace = (spaceID == currentActiveSpaceID)
-            let shouldShow = !isHidden || (isHidden && isActiveSpace && isSwitching)
+
+            let spaceUInt = UInt64(spaceID.replacingOccurrences(of: "space-", with: "")) ?? 0
+            let hasNoWindows = (spaceWindows[spaceUInt] ?? []).isEmpty
+
+            let shouldShow = !isHidden && !hasNoWindows || (isActiveSpace && isSwitching)
 
             if shouldShow {
                 if !window.isVisible {

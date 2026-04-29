@@ -92,7 +92,6 @@ class KeyboardSwitcher: ObservableObject {
 
         startGlobalKeyMonitoring()
         startLocalKeyMonitoring()
-        createEventTap()
 
         isActive = true
         logger.info("KeyboardSwitcher started successfully", category: .keyboardSwitching)
@@ -110,8 +109,8 @@ class KeyboardSwitcher: ObservableObject {
         stopGlobalKeyMonitoring()
         stopLocalKeyMonitoring()
         stopSwitchingModeKeyMonitoring()
-        deactivateSwitchingMode()
         destroyEventTap()
+        deactivateSwitchingMode()
 
         isActive = false
         logger.info("KeyboardSwitcher stopped", category: .keyboardSwitching)
@@ -240,10 +239,18 @@ class KeyboardSwitcher: ObservableObject {
     
     private func handleRegularKeyEvent(_ event: NSEvent, isKeyDown: Bool, scope: String) {
         if isKeyDown && isCommandKeyDown {
-            // Command key is down and another key was pressed - this is a combination
             let keyCode = event.keyCode
             let keyName = keyCodeToString(keyCode)
-            
+            let flags = event.modifierFlags
+
+            // Super+B (all modifiers + B) toggles bar hide
+            if keyCode == 11 && flags.contains(.command) && flags.contains(.control) && flags.contains(.option) && flags.contains(.shift) {
+                logger.info("🙈 Super+B detected — toggling bar hide [\(scope)]", category: .keyboardSwitching)
+                DispatchQueue.main.async {
+                    self.windowManager?.toggleBarHidden()
+                }
+            }
+
             logger.debug("Command combination detected: Cmd+\(keyName) [\(scope)]", category: .keyboardSwitching)
             isModifierCombination = true
         }
@@ -315,6 +322,7 @@ class KeyboardSwitcher: ObservableObject {
         updateWindowListAndAssignKeys()
 
         // Start monitoring keystrokes during switching mode
+        createEventTap()
         startSwitchingModeKeyMonitoring()
         
         DispatchQueue.main.async {
@@ -330,9 +338,10 @@ class KeyboardSwitcher: ObservableObject {
         
         logger.info("⏹️ DEACTIVATING SWITCHING MODE", category: .keyboardSwitching)
         
-        // Stop keystroke monitoring
+        // Stop keystroke monitoring and destroy event tap
         stopSwitchingModeKeyMonitoring()
-        
+        destroyEventTap()
+
         // Clear split selection mode and close mode
         clearSplitSelectionMode()
         clearCloseMode()
@@ -577,12 +586,6 @@ class KeyboardSwitcher: ObservableObject {
     
     /// Create CGEvent tap to capture input system-wide
     private func createEventTap() {
-        guard eventTap == nil else {
-            logger.info("EventTap already exists, skipping creation", category: .keyboardSwitching)
-            return
-        }
-
-        logger.info("Creating persistent event tap...", category: .keyboardSwitching)
         // Create the event tap - capture all keyboard events to prevent them from reaching other apps during switching mode
         let eventMask = (1 << CGEventType.keyDown.rawValue) |
                        (1 << CGEventType.keyUp.rawValue) |
@@ -628,36 +631,9 @@ class KeyboardSwitcher: ObservableObject {
     
     /// Handle CGEvent tap callback for keystroke processing
     private func handleEventTapCallback(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            if let tap = eventTap {
-                CGEvent.tapEnable(tap: tap, enable: true)
-            }
-            return Unmanaged.passUnretained(event)
-        }
-
-        // Log all events hitting the tap
-        let tapFlags = event.flags
-        logger.debug("EventTap type=\(type.rawValue) flags=\(tapFlags.rawValue) cmd=\(tapFlags.contains(.maskCommand)) ctrl=\(tapFlags.contains(.maskControl)) opt=\(tapFlags.contains(.maskAlternate)) shift=\(tapFlags.contains(.maskShift)) switching=\(isSwitchingMode)", category: .keyboardSwitching)
-
-        // Always intercept Cmd+B for bar hide toggle (regardless of switching mode)
-        if type == .keyDown {
-            let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-            let flags = event.flags
-            let hasCmd = flags.contains(.maskCommand)
-            logger.info("EventTap keyDown: keyCode=\(keyCode) cmd=\(hasCmd) switching=\(isSwitchingMode)", category: .keyboardSwitching)
-            if keyCode == 11 && hasCmd && flags.contains(.maskControl) && flags.contains(.maskAlternate) && flags.contains(.maskShift) {
-                logger.info("🙈 Cmd+B detected — toggling bar hide", category: .keyboardSwitching)
-                isModifierCombination = true
-                DispatchQueue.main.async {
-                    self.windowManager?.toggleBarHidden()
-                }
-                return nil
-            }
-        }
-
-        // Outside switching mode, pass everything else through
+        // Only process if we're in switching mode
         guard isSwitchingMode else {
-            return Unmanaged.passUnretained(event)
+            return Unmanaged.passUnretained(event) // Pass through
         }
         
         // During switching mode, consume ALL keyboard events to prevent other apps from receiving them
